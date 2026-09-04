@@ -3,3 +3,4 @@ cmd/dfirmedic/rsrc_windows_*.syso
 payload/*
 !payload/README.md
 *.key
+.superpowers/
