@@ -39,15 +39,20 @@ The kit's job is to make the window between "NIC up" and "tunnel verified" both 
 | Footprint | Installed, documented, reversible: Tailscale MSI and Velociraptor service persist across reboot | Userspace networking or strictly portable (reboot or crash strands the host offline with nobody on site) |
 | Orchestrator | Thin Go binary, unsigned, `CGO_ENABLED=0`, console TUI | `tsnet` in-process (custom networking code); PowerShell (most-scrutinized thing on Windows) |
 | Code signing | None. USB formatted exFAT strips Mark-of-the-Web, so SmartScreen does not prompt | Paid cert (rejected on cost); SignPath (requires public OSS); Azure Trusted Signing ($9.99/mo, unnecessary) |
+| Scope | Internal use on systems the responder's own organization owns | Service-provider / client engagements (would change the THOR Lite license position and the Tailscale plan) |
+| Server hosting | Always-on tailnet node running the Velociraptor server | Mac with sleep disabled (lid-close drops the session); VPS (evidence on a third party's disk) |
+| GUI access | VQL-only by default; RDP over the tailnet as an opt-in flag | MeshCentral (another server and another agent); RDP by default (pollutes logon events, absent on Windows Home) |
+| Scanner | THOR Lite | LOKI-RS (beta). THOR Lite permits commercial use but not service-provider use; acceptable under the internal-use scope |
+| Key minting | Responder mints the ephemeral key in the Tailscale admin console and pastes it into `dfirmedic build` | OAuth client or API key in Keychain (a long-lived key-minting credential on the workstation, for a task done a few times a year) |
 
 ## 5. Architecture
 
 ### 5.1 Responder side
 
-- **Velociraptor server** bound to its tailnet IP only, never `0.0.0.0`. Must be reachable for the whole time the victim is online — a sleeping laptop kills the session. Run it on an always-on tailnet node, or disable sleep for the engagement and accept that dependency.
+- **Velociraptor server** on an always-on tailnet node (home server, NUC, or similar), bound to its tailnet IP only, never `0.0.0.0`. It must be reachable for the whole time the victim is online; the responder's Mac is the analyst console only and may sleep freely.
 - **Tailnet ACL:** `tag:ir-victim` may reach exactly one host (the Velociraptor server) on exactly one port. No other tailnet nodes are reachable from a victim node. Device auto-approval off.
 - **Exit node** on the responder side enforces the real domain allowlist (VirusTotal, Microsoft, etc.) with DNS-based filtering. The victim host never talks to those services directly; the responder submits hashes from their own side.
-- **`dfirmedic build` CLI:** mints the per-incident config. Calls the Tailscale API for an ephemeral, pre-authorized, `tag:ir-victim` auth key with a short TTL; writes and signs `incident.json`; copies the kit to the USB.
+- **`dfirmedic build` CLI:** assembles the per-incident config. The responder mints an ephemeral, pre-authorized, `tag:ir-victim` auth key with a short TTL in the Tailscale admin console and pastes it in; the CLI writes and signs `incident.json`, verifies payload hashes, and copies the kit to the USB. No Tailscale API integration.
 
 ### 5.2 Victim side
 
@@ -68,8 +73,9 @@ payload/
     autorunsc64.exe             Microsoft-signed
     procexp64.exe               Microsoft-signed
     pslist64.exe                Microsoft-signed
-    loki-rs.exe                 LOKI-RS (Rust successor to deprecated Python LOKI)
-    signatures/                 YARA/IOC signature set
+    thor-lite.exe               THOR Lite (Nextron)
+    thor-lite.lic               THOR Lite license file
+    signatures/                 THOR Lite signature set
   manifest.sha256               hashes of every file in payload/
 ```
 
@@ -97,7 +103,8 @@ Velociraptor's offline-collector repacking embeds config into the PE and invalid
   },
   "firewall": {
     "dns_resolvers": ["1.1.1.1", "9.9.9.9"],
-    "allow_rdp_from_responder": true
+    "allow_rdp_from_responder": false,
+    "dns_fallback_to_dhcp": false
   },
   "watchdog": {
     "tunnel_timeout_sec": 600,
@@ -124,6 +131,7 @@ The signature is verified against an ed25519 public key compiled into `dfirmedic
 - Verify SHA-256 of every file under `payload/` against `manifest.sha256`.
 - **Refuse to proceed if any non-loopback adapter has connectivity.** This is the check that protects the core requirement. Applies to `stage` only, not to service auto-start after reboot.
 - Check Windows version, disk space, and that Tailscale and Velociraptor are not already installed.
+- If `allow_rdp_from_responder` is true, confirm the edition ships a Remote Desktop server (Pro/Enterprise/Server). Home editions fail preflight with a clear error rather than failing later.
 
 ### 8.2 BASELINE
 
@@ -144,8 +152,8 @@ Applied while offline so it is already in force when the NIC comes up.
 - Set `DefaultOutboundAction Block` and `DefaultInboundAction Block` on all three profiles.
 - Create rule group `DFIRMedic-<case_id>` containing **allow rules only**:
   - Outbound: `tailscaled.exe`, any protocol, any port (covers direct UDP and DERP fallback over TCP/443).
-  - Outbound: UDP/TCP 53 to the pinned resolvers in `incident.json`. Tailscale cannot bootstrap without DNS; this is easy to forget.
-  - Inbound: TCP 3389 from `responder_tailnet_ip` only, if `allow_rdp_from_responder` is true.
+  - Outbound: UDP/TCP 53 to the pinned resolvers in `incident.json`. Tailscale cannot bootstrap without DNS; this is easy to forget. If `dns_fallback_to_dhcp` is true, the DHCP-provided resolver is also allowed, for sites that block outbound DNS to the internet.
+  - Inbound: TCP 3389 from `responder_tailnet_ip` only, if `allow_rdp_from_responder` is true. Remote Desktop itself is enabled in INSTALL in that case, and the change is logged.
   - Loopback.
 
 Because explicit block rules override allow rules in Windows Firewall, the group contains no block rules at all. Everything not allowed is denied by the profile default.
@@ -158,6 +166,7 @@ Because explicit block rules override allow rules in Windows Firewall, the group
 - `tailscale up --authkey=<key> --hostname=<hostname> --accept-routes=false --accept-dns=false`
   The daemon will attempt to connect and fail (no network). That is expected; it retries on its own once the NIC is up.
 - Install Velociraptor as a service using `velociraptor.exe --config payload\velociraptor.client.yaml service install`, then set the service to **Manual** start. It must not start until the tunnel is verified.
+- If `allow_rdp_from_responder` is true, enable Remote Desktop (`fDenyTSConnections = 0`) and log the change.
 - Copy `dfirmedic.exe` and `incident.json` to `<workdir>` so teardown and break-glass work without the USB.
 
 ### 8.5 READY
@@ -193,7 +202,7 @@ The pre-staged default-deny covers the gap between step 1 and step 3. The window
 | Tunnel drops for more than `heartbeat_grace_sec` after establishment | Same as above. |
 | Preflight, baseline, quarantine, or install phase fails | Halt. Beacon shows `ERROR` with a short code and the phone number. No partial quarantine is left in place — quarantine is applied last-thing-first so a failure mid-phase can be unwound. |
 | Reboot | Services persist and auto-start. `tailscaled` reconnects. Velociraptor is Manual-start, so it does not come up until the orchestrator (registered as a startup task) re-verifies the responder peer and starts it. |
-| Defender quarantines a payload | Staging halts at hash verification. `loki-rs.exe` is the likeliest target; it is staged but not executed until the responder invokes it. |
+| Defender quarantines a payload | Staging halts at hash verification. `thor-lite.exe` is the likeliest target; it is staged but not executed until the responder invokes it. |
 
 ### 10.1 Break-glass
 
@@ -225,9 +234,9 @@ Manifest and audit log are shipped to the responder over the tunnel at first con
 | Original requirement | Delivered by |
 |---|---|
 | Interactive event log interrogation | Velociraptor `Windows.EventLogs.*` artifacts and ad hoc VQL with `parse_evtx()`. `Windows.System.PowerShell` for PowerShell when wanted. |
-| Process explorer | `pslist()` / `pstree` VQL for automation. For the GUI, RDP over the tailnet to run `procexp64.exe` from `payload\tools`. |
+| Process explorer | Velociraptor `Windows.System.Pslist` (hashes and signature status), `pstree`, `Windows.System.DLLs`, `Windows.System.Handles`, and `netstat()`, rendered in the Velociraptor GUI. Kill, suspend, and dump are VQL. RDP over the tailnet to run `procexp64.exe` only if `allow_rdp_from_responder` is set. |
 | Autoruns | `Windows.Sysinternals.Autoruns` artifact wrapping `autorunsc64.exe`. |
-| LOKI scanner | `loki-rs.exe` invoked through a custom artifact; output parsed back. THOR Lite is the alternative if LOKI-RS's beta status bites. Full-disk scans run for hours. |
+| LOKI scanner | `thor-lite.exe` invoked through a custom artifact; output parsed back. Full-disk scans run for hours. |
 | Remote command execution | Velociraptor `Windows.System.CmdShell` and `Windows.System.PowerShell`. |
 
 ## 13. Teardown
@@ -267,23 +276,23 @@ On the responder side, the tailnet node is deleted explicitly even though the ep
 ## 16. Risks
 
 - **Defender behavioral detection.** An unknown binary that flips the firewall to default-deny and installs a VPN is a strong malware heuristic. Mitigated by delegating every such action to signed binaries. Not eliminated.
-- **Tailscale licensing.** The free Personal plan is scoped to personal use. Client IR engagements are arguably commercial. The responder decides.
+- **Tailscale licensing.** The free Personal plan is scoped to personal use. Organizational use likely belongs on a paid plan; the responder decides.
 - **Not literally "only my computer."** Tailscale bootstrap contacts Tailscale's coordination plane, and traffic may relay via DERP. Traffic is end-to-end encrypted throughout, and the ACL restricts reachability, but the guarantee is policy, not topology. Accepted in exchange for zero hosting and relay resilience.
 - **Live operator with SYSTEM** can disable the firewall and undo everything. The audit log will show it happened.
 - **Kernel implant** invalidates all live-response output. Escalate to imaging.
-- **LOKI-RS is beta.** THOR Lite is the fallback.
+- **THOR Lite license scope.** Commercial use is permitted; service-provider use is not. This kit is scoped to the responder's own organization. If it is ever used for a third party, swap in LOKI-RS (GPL-3).
 
-## 17. Open questions
+## 17. Resolved questions
 
-Resolve before or during planning; none block the plan.
+Settled 2026-09-04 and folded into §4:
 
-1. Velociraptor server hosting: always-on tailnet node, or laptop with sleep disabled?
-2. GUI remote access: plain RDP over the tailnet, or MeshCentral?
-3. LOKI-RS or THOR Lite as the shipped scanner?
-4. Default watchdog values: 600s tunnel timeout and 300s heartbeat grace are proposals.
-5. DNS: pinned public resolvers assume the site allows outbound 53 to the internet. Add a config switch to fall back to the DHCP-provided resolver?
-6. How the responder-side `build` CLI authenticates to the Tailscale API (API key in keychain, OAuth client, or manual key paste).
-7. Tailscale plan: personal or paid.
+1. Server hosting — always-on tailnet node.
+2. GUI access — VQL-only by default; RDP as an opt-in flag with a preflight edition check.
+3. Scanner — THOR Lite, under the internal-use scope.
+4. Watchdog defaults — 600 s tunnel timeout, 300 s heartbeat grace; both configurable in `incident.json`.
+5. DNS — pinned public resolvers, with `dns_fallback_to_dhcp` for sites that block outbound 53.
+6. Key minting — manual paste from the Tailscale admin console; no API integration.
+7. Tailscale plan — the responder's call; see §16.
 
 ### Follow-on: responder-side analyst
 
