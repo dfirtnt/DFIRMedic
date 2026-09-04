@@ -1,0 +1,13 @@
+{
+  "RT_MANIFEST": {
+    "#1": {
+      "0409": {
+        "identity": { "name": "dfirmedic", "version": "0.1.0.0" },
+        "description": "DFIRMedic host orchestrator",
+        "execution-level": "requireAdministrator",
+        "ui-access": false,
+        "dpi-awareness": "system"
+      }
+    }
+  }
+}
