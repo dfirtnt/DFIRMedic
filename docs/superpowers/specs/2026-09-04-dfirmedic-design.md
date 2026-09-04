@@ -25,6 +25,7 @@ The kit's job is to make the window between "NIC up" and "tunnel verified" both 
 - Not a replacement for offline imaging. If the host has a kernel-level implant, nothing this kit produces is trustworthy; that's the point where the responder stops and images the disk.
 - Not proof of containment. Firewall lockdown is a speed bump against commodity malware, not a guarantee against a live operator with SYSTEM.
 - Does not solve initial access. A person must be physically at the machine.
+- No AI on the victim host, and no AI in the trust path. The staging state machine, containment decisions, and chain of custody are deterministic and auditable. AI assistance is a separate responder-side component (see §17, item 8).
 
 ## 4. Decisions (locked)
 
@@ -283,3 +284,13 @@ Resolve before or during planning; none block the plan.
 5. DNS: pinned public resolvers assume the site allows outbound 53 to the internet. Add a config switch to fall back to the DHCP-provided resolver?
 6. How the responder-side `build` CLI authenticates to the Tailscale API (API key in keychain, OAuth client, or manual key paste).
 7. Tailscale plan: personal or paid.
+
+### Follow-on: responder-side analyst
+
+Out of scope for this spec; gets its own once the kit exists. An advisory component on the responder's workstation that reads the Velociraptor datastore and never touches the host directly. Planned modes, in priority order:
+
+1. Triage copilot over collected results (event log timelining, autoruns and process-tree anomalies, YARA hit contextualization) and a VQL assistant — one component, two modes.
+2. Sigma over collected `.evtx` (Hayabusa/Chainsaw or Velociraptor's own support), then AI triage of the matches rather than the raw logs.
+3. Incident report drafting from manifest, audit log, and findings.
+
+Hard rules: anything that executes on the host is gated on responder approval; no autonomous remediation; the audit log is never written by the model. Evidence leaves the responder's environment for whatever model is used, so the analyst needs a cloud/local model switch for engagements where that is contractually unacceptable.
