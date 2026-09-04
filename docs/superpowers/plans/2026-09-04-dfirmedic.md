@@ -1220,7 +1220,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
-	"time"
 
 	"github.com/dfirtnt/DFIRMedic/internal/audit"
 )
@@ -1292,7 +1291,6 @@ func TestPSHelperBuildsArgv(t *testing.T) {
 			t.Fatalf("argv %v", f.Calls[0])
 		}
 	}
-	_ = time.Second
 }
 ```
 
@@ -3138,7 +3136,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -3197,6 +3194,9 @@ func code(c, msg string, err error) error {
 }
 
 func (d Deps) phase(name string) error {
+	if d.Man.Phases == nil {
+		d.Man.Phases = map[string]time.Time{}
+	}
 	d.Man.Phases[name] = d.Now().UTC()
 	return d.Log.Phase(name)
 }
@@ -3389,8 +3389,6 @@ func Install(ctx context.Context, d Deps) error {
 	}
 	return nil
 }
-
-var _ = errors.New
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
@@ -4158,7 +4156,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dfirtnt/DFIRMedic/internal/config"
 	"github.com/dfirtnt/DFIRMedic/internal/sign"
 	"github.com/dfirtnt/DFIRMedic/internal/teardown"
 )
@@ -4252,7 +4249,6 @@ func TestVerifyRejectsExpired(t *testing.T) {
 	if _, err := Verify(o.OutDir, pub, o.Now().Add(48*time.Hour)); err == nil {
 		t.Fatal("expired kit accepted")
 	}
-	_ = config.Incident{}
 }
 ```
 
