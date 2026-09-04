@@ -25,7 +25,7 @@ The kit's job is to make the window between "NIC up" and "tunnel verified" both 
 - Not a replacement for offline imaging. If the host has a kernel-level implant, nothing this kit produces is trustworthy; that's the point where the responder stops and images the disk.
 - Not proof of containment. Firewall lockdown is a speed bump against commodity malware, not a guarantee against a live operator with SYSTEM.
 - Does not solve initial access. A person must be physically at the machine.
-- No AI on the victim host, and no AI in the trust path. The staging state machine, containment decisions, and chain of custody are deterministic and auditable. AI assistance is a separate responder-side component (see §17, item 8).
+- No AI on the victim host, and no AI in the trust path. The staging state machine, containment decisions, and chain of custody are deterministic and auditable. AI assistance is a separate responder-side component (see §17, Follow-on).
 
 ## 4. Decisions (locked)
 
