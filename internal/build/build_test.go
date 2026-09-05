@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dfirtnt/DFIRMedic/internal/manifest"
 	"github.com/dfirtnt/DFIRMedic/internal/sign"
 	"github.com/dfirtnt/DFIRMedic/internal/teardown"
 )
@@ -99,5 +100,25 @@ func TestVerifyRejectsExpired(t *testing.T) {
 	Build(o)
 	if _, err := Verify(o.OutDir, pub, o.Now().Add(48*time.Hour)); err == nil {
 		t.Fatal("expired kit accepted")
+	}
+}
+
+func TestVerifyRejectsTamperedFileWithRegeneratedManifest(t *testing.T) {
+	o, pub := fixture(t)
+	if _, err := Build(o); err != nil {
+		t.Fatal(err)
+	}
+	// Tamper a payload file, then regenerate manifest.sha256 to match —
+	// this defeats manifest.Verify's per-file check, but must still be
+	// caught by the PayloadManifestSHA256 binding (the fix for the
+	// original tamper-and-regenerate vulnerability).
+	if err := os.WriteFile(filepath.Join(o.OutDir, "payload", "velociraptor.exe"), []byte("evil"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manifest.Write(filepath.Join(o.OutDir, "payload")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(o.OutDir, pub, o.Now()); err == nil {
+		t.Fatal("tampered payload with a regenerated manifest must still be rejected by the manifest-hash binding")
 	}
 }
