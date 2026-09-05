@@ -154,6 +154,34 @@ func TestBuildRejectsClientConfigThatDoesNotListServerURL(t *testing.T) {
 	}
 }
 
+func TestBuildRejectsServerURLThatIsOnlyAPrefixOfTheConfiguredOne(t *testing.T) {
+	o, _ := fixture(t)
+	// The shipped client config lists a *different*, longer URL that happens
+	// to start with the exact bytes of --server-url. A left-anchored
+	// substring/prefix check (strings.Contains(raw, "- "+serverURL)) would
+	// wrongly accept this, since "- https://203.0.113.10:443/" is a prefix
+	// of "- https://203.0.113.10:443/old-tunnel-path". Exact-line matching
+	// must reject it.
+	badYAML := `Client:
+  server_urls:
+  - https://203.0.113.10:443/old-tunnel-path
+  ca_certificate: |
+    -----BEGIN CERTIFICATE-----
+    AAAA
+    -----END CERTIFICATE-----
+  windows_installer:
+    service_name: Velociraptor
+    install_path: $ProgramFiles\Velociraptor\Velociraptor.exe
+`
+	if err := os.WriteFile(filepath.Join(o.PayloadDir, "velociraptor.client.yaml"), []byte(badYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	o.ServerURL = "https://203.0.113.10:443/" // a true prefix of the shipped entry, not an exact match
+	if _, err := Build(o); err == nil || !strings.Contains(err.Error(), "server_urls") {
+		t.Fatalf("expected server_urls mismatch error for prefix-only match, got %v", err)
+	}
+}
+
 func TestVerifyRejectsExpired(t *testing.T) {
 	o, pub := fixture(t)
 	Build(o)

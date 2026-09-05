@@ -77,6 +77,23 @@ func ServerFromURL(u string) (config.Server, error) {
 	return config.Server{URL: u, IP: host, Port: port}, nil
 }
 
+// hasExactServerURLLine reports whether raw's YAML contains a server_urls
+// list entry that is exactly "- "+serverURL, ignoring surrounding
+// whitespace on the line. A substring/prefix match here would let a client
+// config whose server_urls entry is merely prefixed by serverURL (e.g.
+// serverURL "https://203.0.113.10:443/" against a shipped entry
+// "https://203.0.113.10:443/old-tunnel-path") pass as if it matched exactly,
+// defeating the point of the check.
+func hasExactServerURLLine(raw, serverURL string) bool {
+	want := "- " + serverURL
+	for _, line := range strings.Split(raw, "\n") {
+		if strings.TrimSpace(line) == want {
+			return true
+		}
+	}
+	return false
+}
+
 // clientConfigFacts reads what incident.json must agree with from the shipped
 // client config: the CA fingerprint and the service install path. It also
 // refuses a client config that does not list --server-url, which is the
@@ -86,7 +103,7 @@ func clientConfigFacts(payloadDir, serverURL string) (caSHA256, installPath stri
 	if err != nil {
 		return "", "", fmt.Errorf("client config: %w", err)
 	}
-	if !strings.Contains(string(raw), "- "+serverURL) {
+	if !hasExactServerURLLine(string(raw), serverURL) {
 		return "", "", fmt.Errorf("client config server_urls does not contain %s — regenerate it from the server that owns that address", serverURL)
 	}
 	caPEM, err := velo.ExtractCA(raw)
