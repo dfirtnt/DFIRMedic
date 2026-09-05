@@ -54,6 +54,6 @@ commands (victim host, Windows):
 
 commands (responder workstation):
   keygen       create the responder ed25519 signing keypair
-  build        assemble and sign a per-incident kit onto a USB
+  build        assemble and sign a per-incident kit onto a USB (no Tailscale key needed)
   verify       verify a kit's signature and payload hashes`)
 }

@@ -19,10 +19,10 @@ import (
 	"github.com/dfirtnt/DFIRMedic/internal/config"
 	"github.com/dfirtnt/DFIRMedic/internal/connect"
 	"github.com/dfirtnt/DFIRMedic/internal/manifest"
+	"github.com/dfirtnt/DFIRMedic/internal/probe"
 	"github.com/dfirtnt/DFIRMedic/internal/runner"
 	"github.com/dfirtnt/DFIRMedic/internal/sign"
 	"github.com/dfirtnt/DFIRMedic/internal/stage"
-	"github.com/dfirtnt/DFIRMedic/internal/tailscale"
 	"github.com/dfirtnt/DFIRMedic/internal/teardown"
 	"github.com/dfirtnt/DFIRMedic/internal/ui"
 	"github.com/dfirtnt/DFIRMedic/internal/velo"
@@ -97,16 +97,10 @@ func defaultWorkDir(caseID string) string {
 
 func parseBuild(args []string) (build.Options, error) {
 	var o build.Options
-	var dns, ttl string
+	var ttl string
 	fs := flag.NewFlagSet("build", flag.ContinueOnError)
 	fs.StringVar(&o.CaseID, "case", "", "case id")
-	fs.StringVar(&o.AuthKey, "authkey", "", "ephemeral tagged Tailscale auth key")
-	fs.StringVar(&o.Hostname, "hostname", "", "tailnet hostname (default ir-<case>)")
-	fs.StringVar(&o.ResponderNodeKey, "responder-node-key", "", "responder node public key (tailscale status --json --self)")
-	fs.StringVar(&o.ResponderIP, "responder-ip", "", "responder tailnet IP")
-	fs.StringVar(&o.ServerURL, "server-url", "", "Velociraptor server URL on the tailnet")
-	fs.StringVar(&dns, "dns", "1.1.1.1,9.9.9.9", "comma-separated pinned DNS resolvers")
-	fs.BoolVar(&o.AllowRDP, "rdp", false, "allow RDP from the responder")
+	fs.StringVar(&o.ServerURL, "server-url", "", "Velociraptor server URL, https://<public-ip>[:port]/ (IP literal; default port 443)")
 	fs.BoolVar(&o.DNSFallbackDHCP, "dns-dhcp-fallback", false, "also allow the DHCP resolver")
 	fs.IntVar(&o.TunnelTimeoutSec, "tunnel-timeout", 600, "seconds")
 	fs.IntVar(&o.HeartbeatGraceSec, "heartbeat-grace", 300, "seconds")
@@ -123,20 +117,14 @@ func parseBuild(args []string) (build.Options, error) {
 		return o, err
 	}
 	var missing []string
-	for name, v := range map[string]string{"case": o.CaseID, "authkey": o.AuthKey, "responder-node-key": o.ResponderNodeKey,
-		"responder-ip": o.ResponderIP, "server-url": o.ServerURL, "phone": o.ContactPhone, "name": o.ContactName,
-		"breakglass-code": o.BreakglassCode, "out": o.OutDir} {
+	for name, v := range map[string]string{"case": o.CaseID, "server-url": o.ServerURL, "phone": o.ContactPhone,
+		"name": o.ContactName, "breakglass-code": o.BreakglassCode, "out": o.OutDir} {
 		if v == "" {
 			missing = append(missing, "--"+name)
 		}
 	}
 	if len(missing) > 0 {
 		return o, fmt.Errorf("missing required flags: %s", strings.Join(missing, " "))
-	}
-	for _, r := range strings.Split(dns, ",") {
-		if r = strings.TrimSpace(r); r != "" {
-			o.DNSResolvers = append(o.DNSResolvers, r)
-		}
 	}
 	d, err := time.ParseDuration(ttl)
 	if err != nil {
@@ -165,7 +153,7 @@ type host struct {
 	fw     win.Firewall
 	net    win.Net
 	sys    win.Sys
-	ts     tailscale.Client
+	caPEM  []byte
 	velo   velo.Client
 }
 
@@ -203,12 +191,19 @@ func openHost(dir, workDir string, dryRun bool) (*host, error) {
 	}
 	ui.EnableVT()
 	payload := filepath.Join(workDir, "payload")
+	caPEM, _ := func() ([]byte, error) {
+		raw, err := os.ReadFile(filepath.Join(dir, "payload", "velociraptor.client.yaml"))
+		if err != nil {
+			return nil, err
+		}
+		return velo.ExtractCA(raw)
+	}()
 	return &host{
 		inc: inc, raw: raw, sig: sig, pub: pub, log: log, man: man, r: r,
 		beacon: ui.New(os.Stdout, inc.Contact),
 		fw:     win.Firewall{R: r}, net: win.Net{R: r}, sys: win.Sys{R: r},
-		ts:   tailscale.Client{R: r, MSIPath: filepath.Join(payload, "tailscale-setup.msi")},
-		velo: velo.Client{R: r, ExePath: filepath.Join(payload, "velociraptor.exe"), ConfigPath: filepath.Join(payload, "velociraptor.client.yaml")},
+		caPEM: caPEM,
+		velo:  velo.Client{R: r, ExePath: filepath.Join(payload, "velociraptor.exe"), ConfigPath: filepath.Join(payload, "velociraptor.client.yaml")},
 	}, nil
 }
 
@@ -250,7 +245,7 @@ func cmdStage(args []string) int {
 	defer cancel()
 	d := stage.Deps{
 		Inc: h.inc, RawConfig: h.raw, Sig: h.sig, PubKey: h.pub, KitDir: o.Kit, WorkDir: workDir, ExeSHA256: exeHash,
-		R: h.r, Log: h.log, Man: h.man, Beacon: h.beacon, FW: h.fw, Net: h.net, Sys: h.sys, TS: h.ts, Velo: h.velo,
+		R: h.r, Log: h.log, Man: h.man, Beacon: h.beacon, FW: h.fw, Net: h.net, Sys: h.sys, Velo: h.velo,
 		Now: time.Now, Elevated: win.IsElevated,
 	}
 	if err := stage.Run(c, d); err != nil {
@@ -265,7 +260,8 @@ func cmdStage(args []string) int {
 func runConnect(c context.Context, h *host, workDir string) int {
 	d := connect.Deps{
 		Inc: h.inc, WorkDir: workDir, R: h.r, Log: h.log, Man: h.man, Beacon: h.beacon,
-		Net: h.net, TS: h.ts, Velo: h.velo,
+		Net: h.net, Velo: h.velo,
+		Probe: probe.TLS{IP: h.inc.Server.IP, Port: h.inc.Server.Port, CAPEM: h.caPEM, Timeout: 10 * time.Second},
 	}
 	if err := connect.Run(c, d); err != nil {
 		_ = h.log.Record("error", map[string]string{"error": err.Error()})
@@ -299,7 +295,7 @@ func cmdConnect(args []string) int {
 
 func teardownDeps(h *host, workDir string) teardown.Deps {
 	return teardown.Deps{Inc: h.inc, WorkDir: workDir, R: h.r, Log: h.log, Man: h.man,
-		FW: h.fw, Net: h.net, Sys: h.sys, TS: h.ts, Velo: h.velo, Now: time.Now}
+		FW: h.fw, Net: h.net, Sys: h.sys, Velo: h.velo, Now: time.Now}
 }
 
 func cmdTeardown(args []string) int {

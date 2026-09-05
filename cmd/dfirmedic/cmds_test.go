@@ -71,13 +71,19 @@ func TestParseBuildRequiresCore(t *testing.T) {
 	if _, err := parseBuild([]string{"--case", "C"}); err == nil {
 		t.Fatal("missing required flags must error")
 	}
-	o, err := parseBuild([]string{"--case", "C", "--authkey", "k", "--responder-node-key", "n", "--responder-ip", "100.64.0.1",
-		"--server-url", "https://x/", "--phone", "+1", "--name", "A", "--breakglass-code", "z", "--out", "/usb", "--dns", "1.1.1.1,9.9.9.9", "--rdp"})
+	o, err := parseBuild([]string{"--case", "C",
+		"--server-url", "https://x/", "--phone", "+1", "--name", "A", "--breakglass-code", "z", "--out", "/usb", "--dns-dhcp-fallback"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(o.DNSResolvers) != 2 || !o.AllowRDP || o.OutDir != "/usb" {
+	if !o.DNSFallbackDHCP || o.OutDir != "/usb" {
 		t.Fatalf("%+v", o)
+	}
+}
+
+func TestParseBuildRejectsRemovedFlags(t *testing.T) {
+	if _, err := parseBuild([]string{"--case", "C", "--authkey", "x"}); err == nil {
+		t.Fatal("--authkey must no longer exist")
 	}
 }
 
