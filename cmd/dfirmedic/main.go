@@ -13,6 +13,20 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "stage":
+		os.Exit(cmdStage(os.Args[2:]))
+	case "connect":
+		os.Exit(cmdConnect(os.Args[2:]))
+	case "teardown":
+		os.Exit(cmdTeardown(os.Args[2:]))
+	case "breakglass":
+		os.Exit(cmdBreakglass(os.Args[2:]))
+	case "keygen":
+		os.Exit(cmdKeygen(os.Args[2:]))
+	case "build":
+		os.Exit(cmdBuild(os.Args[2:]))
+	case "verify":
+		os.Exit(cmdVerify(os.Args[2:]))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", os.Args[1])
 		usage()
