@@ -15,15 +15,11 @@ func TestEditionID(t *testing.T) {
 	if err != nil || id != "Professional" {
 		t.Fatalf("%q %v", id, err)
 	}
-	if IsHomeEdition("Professional") || !IsHomeEdition("Core") || !IsHomeEdition("CoreSingleLanguage") {
-		t.Fatal("home detection wrong")
-	}
 }
 
-func TestEnableRDPAndTasks(t *testing.T) {
+func TestCreateAndDeleteStartupTask(t *testing.T) {
 	f := runner.NewFake()
 	s := Sys{R: f}
-	s.EnableRDP(context.Background())
 	s.CreateStartupTask(context.Background(), "DFIRMedic-C1", `C:\w\dfirmedic.exe`, `connect --workdir C:\w`)
 	s.DeleteStartupTask(context.Background(), "DFIRMedic-C1")
 	all := ""
@@ -31,7 +27,6 @@ func TestEnableRDPAndTasks(t *testing.T) {
 		all += strings.Join(c, " ") + "\n"
 	}
 	for _, want := range []string{
-		`reg.exe add HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server /v fDenyTSConnections /t REG_DWORD /d 0 /f`,
 		`schtasks.exe /Create /TN DFIRMedic-C1 /SC ONSTART /RU SYSTEM /RL HIGHEST /F /TR "C:\w\dfirmedic.exe" connect --workdir C:\w`,
 		`schtasks.exe /Delete /TN DFIRMedic-C1 /F`,
 	} {

@@ -25,15 +25,6 @@ func (s Sys) EditionID(ctx context.Context) (string, error) {
 	return "", errors.New("EditionID not found in reg output")
 }
 
-func IsHomeEdition(editionID string) bool {
-	return strings.HasPrefix(editionID, "Core")
-}
-
-func (s Sys) EnableRDP(ctx context.Context) error {
-	_, err := s.R.Run(ctx, "reg.exe", "add", `HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server`, "/v", "fDenyTSConnections", "/t", "REG_DWORD", "/d", "0", "/f")
-	return err
-}
-
 func (s Sys) CreateStartupTask(ctx context.Context, name, exe, args string) error {
 	_, err := s.R.Run(ctx, "schtasks.exe", "/Create", "/TN", name, "/SC", "ONSTART", "/RU", "SYSTEM", "/RL", "HIGHEST", "/F", "/TR", fmt.Sprintf(`"%s" %s`, exe, args))
 	return err

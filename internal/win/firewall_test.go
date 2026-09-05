@@ -8,54 +8,16 @@ import (
 	"github.com/dfirtnt/DFIRMedic/internal/runner"
 )
 
-func TestQuarantineRulesAllowOnlyWhatSpecRequires(t *testing.T) {
-	rules := QuarantineRules([]string{"1.1.1.1", "9.9.9.9"}, false, "")
-	var names []string
-	for _, r := range rules {
-		names = append(names, r.Name)
-		if r.LocalPort == "3389" {
-			t.Fatalf("no RDP inbound rule without the flag: %+v", r)
-		}
-	}
-	joined := strings.Join(names, ",")
-	for _, want := range []string{"tailscaled", "dns-udp", "dns-tcp"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("missing %s in %s", want, joined)
-		}
-	}
-	for _, r := range rules {
-		if r.Name == "dns-udp" && r.RemoteAddress != "1.1.1.1,9.9.9.9" {
-			t.Fatalf("dns rule must pin resolvers: %+v", r)
-		}
-	}
-}
-
-func TestQuarantineRulesRDPAndDHCPFallback(t *testing.T) {
-	rules := QuarantineRules([]string{"1.1.1.1"}, true, "100.64.0.1")
-	var rdp, dhcp bool
-	for _, r := range rules {
-		if r.Direction == "Inbound" && r.LocalPort == "3389" && r.RemoteAddress == "100.64.0.1" {
-			rdp = true
-		}
-		if strings.HasPrefix(r.Name, "dns-dhcp") && r.RemoteAddress == "" {
-			dhcp = true
-		}
-	}
-	if !rdp || !dhcp {
-		t.Fatalf("rdp=%v dhcp=%v rules=%+v", rdp, dhcp, rules)
-	}
-}
-
 func TestAddRuleBuildsCommand(t *testing.T) {
 	f := runner.NewFake()
 	fw := Firewall{R: f}
 	txt, err := fw.AddRule(context.Background(), "DFIRMedic-C1", Rule{
-		Name: "tailscaled", Direction: "Outbound", Program: TailscaledPath,
+		Name: "example", Direction: "Outbound", Program: `C:\Program Files\Example\example.exe`,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"New-NetFirewallRule", "-Group 'DFIRMedic-C1'", "-Direction 'Outbound'", "-Action Allow", `-Program 'C:\Program Files\Tailscale\tailscaled.exe'`} {
+	for _, want := range []string{"New-NetFirewallRule", "-Group 'DFIRMedic-C1'", "-Direction 'Outbound'", "-Action Allow", `-Program 'C:\Program Files\Example\example.exe'`} {
 		if !strings.Contains(txt, want) {
 			t.Fatalf("missing %q in %s", want, txt)
 		}
@@ -190,25 +152,8 @@ func TestAddRuleRejectsNonNumericIcmpType(t *testing.T) {
 	}
 }
 
-func TestQuarantineRulesScopeDNSToDnscache(t *testing.T) {
-	rules := QuarantineRules([]string{"1.1.1.1"}, true, "")
-	var seen int
-	for _, r := range rules {
-		if !strings.HasPrefix(r.Name, "dns-") {
-			continue
-		}
-		seen++
-		if r.Program != SvchostPath || r.Service != "Dnscache" {
-			t.Fatalf("DNS rule must be scoped to the system resolver, not any process: %+v", r)
-		}
-	}
-	if seen != 4 {
-		t.Fatalf("expected pinned + dhcp-fallback udp/tcp rules, saw %d", seen)
-	}
-}
-
 func TestQuarantineRulesIncludeDHCPClient(t *testing.T) {
-	rules := QuarantineRules([]string{"1.1.1.1"}, false, "")
+	rules := QuarantineRules(false)
 	want := map[string]Rule{
 		"dhcp-out":   {Direction: "Outbound", Protocol: "UDP", LocalPort: "68", RemotePort: "67"},
 		"dhcp-in":    {Direction: "Inbound", Protocol: "UDP", LocalPort: "68", RemotePort: "67"},
@@ -234,7 +179,7 @@ func TestQuarantineRulesIncludeDHCPClient(t *testing.T) {
 }
 
 func TestQuarantineRulesIncludeIPv6NeighborDiscovery(t *testing.T) {
-	rules := QuarantineRules([]string{"1.1.1.1"}, false, "")
+	rules := QuarantineRules(false)
 	var out, in bool
 	for _, r := range rules {
 		if r.Protocol != "ICMPv6" {
@@ -258,12 +203,35 @@ func TestQuarantineRulesIncludeIPv6NeighborDiscovery(t *testing.T) {
 }
 
 func TestQuarantineRulesNoInboundBeyondDHCPAndNDWithoutRDP(t *testing.T) {
-	for _, r := range QuarantineRules([]string{"1.1.1.1"}, false, "") {
+	for _, r := range QuarantineRules(false) {
 		if r.Direction != "Inbound" {
 			continue
 		}
 		if !strings.HasPrefix(r.Name, "dhcp") && r.Protocol != "ICMPv6" {
 			t.Fatalf("unexpected inbound rule without RDP: %+v", r)
+		}
+	}
+}
+
+func TestQuarantineRulesHaveNoDNSUnlessDHCPFallback(t *testing.T) {
+	for _, r := range QuarantineRules(false) {
+		if r.RemotePort == "53" || strings.HasPrefix(r.Name, "dns") {
+			t.Fatalf("no DNS rule allowed by default: %+v", r)
+		}
+		if r.Program != "" && r.Program != SvchostPath {
+			t.Fatalf("only svchost may appear in the base quarantine set: %+v", r)
+		}
+	}
+	if n := len(QuarantineRules(false)); n != 6 {
+		t.Fatalf("base set must be dhcp x4 + nd x2 = 6, got %d", n)
+	}
+	withDHCP := QuarantineRules(true)
+	if n := len(withDHCP); n != 8 {
+		t.Fatalf("dhcp fallback adds exactly two DNS rules, got %d", n)
+	}
+	for _, r := range withDHCP[6:] {
+		if r.Service != "Dnscache" || r.RemotePort != "53" || r.RemoteAddress != "" {
+			t.Fatalf("dhcp-fallback DNS rule must be Dnscache-scoped, port 53, any address: %+v", r)
 		}
 	}
 }

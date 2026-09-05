@@ -15,8 +15,6 @@ import (
 	"github.com/dfirtnt/DFIRMedic/internal/runner"
 )
 
-const TailscaledPath = `C:\Program Files\Tailscale\tailscaled.exe`
-
 // SvchostPath is the host process for the Dnscache and Dhcp services. The
 // built-in Core Networking rules use exactly this env-var form.
 const SvchostPath = `%SystemRoot%\System32\svchost.exe`
@@ -213,38 +211,26 @@ func (f Firewall) EnableRules(ctx context.Context, names []string) error {
 	return err
 }
 
-// QuarantineRules is the entire allow-list from spec §8.3. Allow rules only.
-// Every pre-existing rule is disabled by Quarantine, so anything the host
-// needs to get an address and reach the tailnet must be listed here.
-func QuarantineRules(dnsResolvers []string, dnsFallbackDHCP bool, rdpFrom string) []Rule {
-	dns := func(name, proto, addrs string) Rule {
-		return Rule{Name: name, Direction: "Outbound", Program: SvchostPath, Service: "Dnscache", Protocol: proto, RemotePort: "53", RemoteAddress: addrs}
-	}
+// QuarantineRules are the non-server rules of the quarantine: the DHCP
+// client (v4/v6) so the host gets an address on reconnect, IPv6 neighbor
+// discovery, and — only when the responder opted in — DNS to the DHCP
+// resolver scoped to the Dnscache service. There is deliberately no DNS by
+// default: the victim reaches its server by IP (spec 2026-09-05 §3), and a
+// resolver rule is a covert channel for any process on the host.
+func QuarantineRules(dnsFallbackDHCP bool) []Rule {
 	rules := []Rule{
-		{Name: "tailscaled", Direction: "Outbound", Program: TailscaledPath},
-		// DHCP client, v4 and v6. Without these the host never gets an
-		// address on reconnect and the watchdog fails closed.
 		{Name: "dhcp-out", Direction: "Outbound", Program: SvchostPath, Service: "Dhcp", Protocol: "UDP", LocalPort: "68", RemotePort: "67"},
 		{Name: "dhcp-in", Direction: "Inbound", Program: SvchostPath, Service: "Dhcp", Protocol: "UDP", LocalPort: "68", RemotePort: "67"},
 		{Name: "dhcpv6-out", Direction: "Outbound", Program: SvchostPath, Service: "Dhcp", Protocol: "UDP", LocalPort: "546", RemotePort: "547"},
 		{Name: "dhcpv6-in", Direction: "Inbound", Program: SvchostPath, Service: "Dhcp", Protocol: "UDP", LocalPort: "546", RemotePort: "547"},
-		// IPv6 neighbor discovery: RS/NS/NA out, RA/NS/NA in. Kernel traffic,
-		// so no program scope. IPv4 ARP is below the firewall and needs nothing.
 		{Name: "nd-out", Direction: "Outbound", Protocol: "ICMPv6", IcmpType: "133,135,136"},
 		{Name: "nd-in", Direction: "Inbound", Protocol: "ICMPv6", IcmpType: "134,135,136"},
 	}
-	if len(dnsResolvers) > 0 {
-		addrs := strings.Join(dnsResolvers, ",")
-		rules = append(rules, dns("dns-udp", "UDP", addrs), dns("dns-tcp", "TCP", addrs))
-	}
-	// No RemoteAddress restriction here: the DHCP-assigned resolver's address
-	// isn't known ahead of time. Scoping to the Dnscache service keeps this
-	// from being a port-53 exfil channel for arbitrary processes.
 	if dnsFallbackDHCP {
-		rules = append(rules, dns("dns-dhcp-udp", "UDP", ""), dns("dns-dhcp-tcp", "TCP", ""))
-	}
-	if rdpFrom != "" {
-		rules = append(rules, Rule{Name: "rdp-from-responder", Direction: "Inbound", Protocol: "TCP", LocalPort: "3389", RemoteAddress: rdpFrom})
+		dns := func(name, proto string) Rule {
+			return Rule{Name: name, Direction: "Outbound", Program: SvchostPath, Service: "Dnscache", Protocol: proto, RemotePort: "53"}
+		}
+		rules = append(rules, dns("dns-dhcp-udp", "UDP"), dns("dns-dhcp-tcp", "TCP"))
 	}
 	return rules
 }
