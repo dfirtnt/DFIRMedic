@@ -50,9 +50,10 @@ func (r *execRunner) Run(ctx context.Context, name string, args ...string) (Resu
 	runErr := cmd.Run()
 	res := Result{Stdout: out.String(), Stderr: errb.String(), Duration: time.Since(start)}
 	var ee *exec.ExitError
+	started := errors.As(runErr, &ee)
 	switch {
 	case runErr == nil:
-	case errors.As(runErr, &ee):
+	case started:
 		res.ExitCode = ee.ExitCode()
 	default:
 		res.ExitCode = -1
@@ -68,7 +69,7 @@ func (r *execRunner) Run(ctx context.Context, name string, args ...string) (Resu
 			"stderr": truncate(res.Stderr, 4096),
 		})
 	}
-	if runErr != nil && res.ExitCode == -1 {
+	if runErr != nil && !started {
 		return res, runErr
 	}
 	if res.ExitCode != 0 {
@@ -119,12 +120,12 @@ func (f *Fake) Run(_ context.Context, name string, args ...string) (Result, erro
 	full := strings.Join(argv, " ")
 	best := ""
 	for k := range f.Responses {
-		if strings.HasPrefix(full, k) && len(k) > len(best) {
+		if strings.HasPrefix(full, k) && (len(full) == len(k) || full[len(k)] == ' ') && len(k) > len(best) {
 			best = k
 		}
 	}
 	for k := range f.Errors {
-		if strings.HasPrefix(full, k) && len(k) > len(best) {
+		if strings.HasPrefix(full, k) && (len(full) == len(k) || full[len(k)] == ' ') && len(k) > len(best) {
 			best = k
 		}
 	}
@@ -145,7 +146,8 @@ func (f *Fake) Run(_ context.Context, name string, args ...string) (Result, erro
 func (f *Fake) Called(name string, args ...string) bool {
 	want := f.Key(name, args...)
 	for _, c := range f.Calls {
-		if strings.HasPrefix(strings.Join(c, " "), want) {
+		joined := strings.Join(c, " ")
+		if strings.HasPrefix(joined, want) && (len(joined) == len(want) || joined[len(want)] == ' ') {
 			return true
 		}
 	}

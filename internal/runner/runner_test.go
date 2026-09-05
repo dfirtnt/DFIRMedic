@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/dfirtnt/DFIRMedic/internal/audit"
 )
@@ -76,5 +77,30 @@ func TestPSHelperBuildsArgv(t *testing.T) {
 		if f.Calls[0][i] != want[i] {
 			t.Fatalf("argv %v", f.Calls[0])
 		}
+	}
+}
+
+func TestFakeDoesNotMatchAcrossWordBoundary(t *testing.T) {
+	f := NewFake()
+	f.Responses[f.Key("tailscale.exe", "status")] = Result{Stdout: "SHORT"}
+	res, _ := f.Run(context.Background(), "tailscale.exe", "statusjson-report")
+	if res.Stdout == "SHORT" {
+		t.Fatal("must not match across a word boundary")
+	}
+}
+
+func TestExecWrapsSignalKilledProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses /bin/sh")
+	}
+	p := filepath.Join(t.TempDir(), "audit.jsonl")
+	log, _ := audit.Open(p, nil)
+	r := NewExec(log, &audit.Manifest{})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := r.Run(ctx, "/bin/sh", "-c", "sleep 5")
+	var ee *ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("signal-killed process must still be wrapped in *ExitError, got %T: %v", err, err)
 	}
 }
