@@ -5119,6 +5119,18 @@ private key at `~/.dfirmedic/responder.key`. Back that file up offline.
 
 From your workstation, over the tunnel: `dfirmedic.exe teardown --workdir C:\ProgramData\DFIRMedic\<case>`
 (via a Velociraptor `Windows.System.CmdShell` collection), then delete the node in the admin console.
+
+> **Launch teardown detached.** Teardown's first step stops the Velociraptor
+> service — the very channel you are watching the collection through — so a
+> collection that waits for its own command to finish will never report a
+> result, and you lose visibility partway through with the firewall only
+> partially restored. Run it so it outlives the transport: wrap it in a
+> scheduled task (`schtasks /Create /SC ONCE /ST <t+1min> /RU SYSTEM /TR "..."`,
+> or `/Run` it immediately), or `start /b` it from the CmdShell collection, and
+> accept that the collection itself will not show a result. Confirm the outcome
+> afterwards from the host's `audit.jsonl` / `manifest.json`, or on-site — not
+> from the collection output. If the tunnel is already gone, fall back to the
+> local break-glass path (§10.1).
 ```
 
 - [ ] **Step 8: Write `docs/integration-tests.md`**
@@ -5140,7 +5152,7 @@ exFAT USB image or shared folder that strips Mark-of-the-Web.
 | 3 | Watchdog timeout | Build the kit with `--tunnel-timeout 60`. Stop the responder workstation's tailscaled. Stage, reconnect. | After ~60 s: ERROR E50, all physical adapters Disabled, firewall still default-deny, Velociraptor service not running. |
 | 4 | Heartbeat loss | Build with `--heartbeat-grace 60`. After CONNECTED, stop responder tailscaled. | After ~60 s: ERROR E51, adapters Disabled, Velociraptor stopped. |
 | 5 | DERP fallback | On the VM host, block outbound UDP from the VM except 53. Stage, reconnect. | CONNECTED via relay (`tailscale status` shows `relay`). |
-| 6 | Reboot mid-session | After CONNECTED, reboot the VM. | Startup task runs `connect`; Velociraptor stays stopped until the responder peer is verified, then starts. Beacon window reappears at CONNECTED. |
+| 6 | Reboot mid-session | After CONNECTED, reboot the VM. | Startup task runs `connect` and the watchdog/connect logic runs correctly in the background; Velociraptor stays stopped until the responder peer is verified, then starts. **No beacon is visible to anyone on-site after a reboot** — the task is registered `schtasks /SC ONSTART /RU SYSTEM`, so it runs in Session 0 with no interactive desktop. Known limitation, not a bug: verify state from the server GUI and `audit.jsonl` / `manifest.json` instead. |
 | 7 | Tampered payload | Edit one byte of `payload\thor-lite.exe` on the stick. | ERROR E13 in PREFLIGHT; nothing else changes. |
 | 8 | Home edition + RDP | Build with `--rdp`; run on a Windows Home VM. | ERROR E15 in PREFLIGHT. |
 | 9 | Break-glass | After CONNECTED, run `dfirmedic.exe breakglass --workdir … --code WRONG` then with the right code. | Wrong: E60, nothing changes, attempt logged. Right: full teardown. |

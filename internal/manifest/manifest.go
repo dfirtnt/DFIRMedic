@@ -103,6 +103,34 @@ func Verify(dir string) (map[string]string, error) {
 			errs = append(errs, fmt.Errorf("hash mismatch: %s", rel))
 		}
 	}
+	// Hashing only what the manifest lists would miss a file ADDED to the
+	// payload (e.g. a DLL dropped next to velociraptor.exe): the manifest
+	// itself is untouched, so the E17 binding check passes, and every listed
+	// hash still matches. Walk the tree the same way Write does and reject
+	// anything that has no entry.
+	walkErr := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == FileName {
+			return nil
+		}
+		if _, ok := expected[rel]; !ok {
+			errs = append(errs, fmt.Errorf("unlisted file: %s", rel))
+		}
+		return nil
+	})
+	if walkErr != nil {
+		errs = append(errs, walkErr)
+	}
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}

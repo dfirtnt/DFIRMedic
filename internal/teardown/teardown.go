@@ -30,6 +30,7 @@ type Deps struct {
 	Log     *audit.Log
 	Man     *audit.Manifest
 	FW      win.Firewall
+	Net     win.Net
 	Sys     win.Sys
 	TS      tailscale.Client
 	Velo    velo.Client
@@ -69,6 +70,18 @@ func Run(ctx context.Context, d Deps) error {
 	step("remove firewall rule group", func() error { return d.FW.RemoveGroup(ctx, d.Inc.RuleGroup()) })
 	step("import original firewall policy", func() error {
 		return d.FW.Import(ctx, filepath.Join(d.WorkDir, "firewall-original.wfw"))
+	})
+	// connect.FailClosed disables every physical adapter when the watchdog
+	// fires, and that is exactly the state someone runs breakglass from, so
+	// restoring the firewall alone would leave the host still offline.
+	// Re-enabling an already-enabled adapter is a no-op, so enable them all
+	// rather than tracking which ones were disabled.
+	step("re-enable network adapters", func() error {
+		ads, err := d.Net.PhysicalAdapters(ctx)
+		if err != nil {
+			return err
+		}
+		return d.Net.EnableAll(ctx, ads)
 	})
 	step("restore firewall profiles", func() error {
 		raw, err := os.ReadFile(filepath.Join(d.WorkDir, "baseline.json"))

@@ -35,3 +35,15 @@ func TestDisableAll(t *testing.T) {
 		t.Fatalf("%v", f.Calls)
 	}
 }
+
+func TestEnableAll(t *testing.T) {
+	f := runner.NewFake()
+	err := Net{R: f}.EnableAll(context.Background(), []Adapter{{Name: "Wi-Fi"}, {Name: "Ethernet 2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Calls) != 2 || f.Calls[0][len(f.Calls[0])-1] != "Enable-NetAdapter -Name 'Wi-Fi' -Confirm:$false" ||
+		f.Calls[1][len(f.Calls[1])-1] != "Enable-NetAdapter -Name 'Ethernet 2' -Confirm:$false" {
+		t.Fatalf("%v", f.Calls)
+	}
+}

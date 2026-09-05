@@ -28,7 +28,7 @@ func deps(t *testing.T, f *runner.Fake) Deps {
 	inc := &config.Incident{CaseID: "C1", BreakglassCodeHash: CodeHash("hunter2")}
 	return Deps{
 		Inc: inc, WorkDir: work, R: f, Log: log, Man: &audit.Manifest{Phases: map[string]time.Time{}},
-		FW: win.Firewall{R: f}, Sys: win.Sys{R: f},
+		FW: win.Firewall{R: f}, Net: win.Net{R: f}, Sys: win.Sys{R: f},
 		TS: tailscale.Client{R: f, MSIPath: `C:\w\payload\tailscale-setup.msi`},
 		Velo: velo.Client{R: f, ExePath: "v.exe", ConfigPath: "c.yaml"},
 		Now: func() time.Time { return time.Unix(2000, 0) },
@@ -58,6 +58,7 @@ func TestRunOrder(t *testing.T) {
 		`msiexec.exe /x C:\w\payload\tailscale-setup.msi /quiet /norestart`,
 		"Remove-NetFirewallRule -Group 'DFIRMedic-C1'",
 		"netsh.exe advfirewall import " + filepath.Join(d.WorkDir, "firewall-original.wfw"),
+		"Get-NetAdapter -Physical",
 		"Set-NetFirewallProfile -Profile 'Domain' -Enabled 'True' -DefaultInboundAction 'Block' -DefaultOutboundAction 'Allow'",
 	}
 	last := -1

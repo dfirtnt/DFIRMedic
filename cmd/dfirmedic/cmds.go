@@ -295,7 +295,7 @@ func cmdConnect(args []string) int {
 
 func teardownDeps(h *host, workDir string) teardown.Deps {
 	return teardown.Deps{Inc: h.inc, WorkDir: workDir, R: h.r, Log: h.log, Man: h.man,
-		FW: h.fw, Sys: h.sys, TS: h.ts, Velo: h.velo, Now: time.Now}
+		FW: h.fw, Net: h.net, Sys: h.sys, TS: h.ts, Velo: h.velo, Now: time.Now}
 }
 
 func cmdTeardown(args []string) int {

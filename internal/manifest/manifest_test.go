@@ -60,3 +60,37 @@ func TestVerifyRejectsMalformedLine(t *testing.T) {
 		t.Fatal("expected parse error")
 	}
 }
+
+// A file ADDED to the payload after the manifest was written must be caught:
+// the manifest is untouched (so the signed-hash binding still passes) and
+// every listed hash still matches, but the extra file has no entry.
+func TestVerifyDetectsUnlistedFile(t *testing.T) {
+	dir := mk(t, map[string]string{"a.exe": "aaa"})
+	if _, err := Write(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "evil.dll"), []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Verify(dir)
+	if err == nil {
+		t.Fatal("expected an error for a file that is not in the manifest")
+	}
+	if !strings.Contains(err.Error(), "evil.dll") {
+		t.Fatalf("error must name the unlisted file: %v", err)
+	}
+}
+
+func TestVerifyDetectsUnlistedFileInSubdir(t *testing.T) {
+	dir := mk(t, map[string]string{"a.exe": "aaa", "tools/b.exe": "bbb"})
+	if _, err := Write(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tools", "extra.dll"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Verify(dir)
+	if err == nil || !strings.Contains(err.Error(), "tools/extra.dll") {
+		t.Fatalf("want tools/extra.dll named, got %v", err)
+	}
+}

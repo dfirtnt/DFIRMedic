@@ -212,8 +212,18 @@ func TestRunHappyPath(t *testing.T) {
 	if !(iRule < iProf && iProf < iMSI && iMSI < iUp && iUp < iVelo && iVelo < iTask) {
 		t.Fatalf("bad order:\n%s", all)
 	}
-	if len(d.Man.Rules) != 3 { // tailscaled, dns-udp, dns-tcp
+	if len(d.Man.Rules) != 4 { // tailscaled, dns-udp, dns-tcp, velociraptor-egress
 		t.Fatalf("manifest rules: %v", d.Man.Rules)
+	}
+	// Velociraptor is its own process: it needs an explicit egress rule to the
+	// responder, not just the tailscaled one.
+	veloRule := "New-NetFirewallRule -Group 'DFIRMedic-C1' -DisplayName 'DFIRMedic-C1: velociraptor-egress' -Direction 'Outbound' -Action Allow -Program " +
+		"'" + filepath.Join(d.WorkDir, "payload", "velociraptor.exe") + "' -RemoteAddress '100.64.0.1' | Out-Null"
+	if !f.Called("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", veloRule) {
+		t.Fatalf("missing velociraptor egress rule in:\n%s", all)
+	}
+	if i := strings.Index(all, "velociraptor-egress"); i < 0 || i > iProf {
+		t.Fatalf("velociraptor egress rule must be added before the default-deny flip:\n%s", all)
 	}
 	// workdir populated, service points at workdir copies
 	for _, p := range []string{"manifest.json", "baseline.json", "dfirmedic.exe", "incident.json", "incident.json.sig", filepath.Join("payload", "velociraptor.exe"), filepath.Join("payload", "tools", "thor-lite.exe")} {

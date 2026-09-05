@@ -59,3 +59,16 @@ func (n Net) DisableAll(ctx context.Context, adapters []Adapter) error {
 	}
 	return nil
 }
+
+// EnableAll is the counterpart to DisableAll: teardown/breakglass call it to
+// give the host its connectivity back after a fail-closed watchdog trip.
+// Enabling an already-enabled adapter is a harmless no-op, so callers can
+// pass every physical adapter without tracking which ones were disabled.
+func (n Net) EnableAll(ctx context.Context, adapters []Adapter) error {
+	for _, a := range adapters {
+		if _, err := runner.PS(ctx, n.R, fmt.Sprintf("Enable-NetAdapter -Name %s -Confirm:$false", psq(a.Name))); err != nil {
+			return fmt.Errorf("enable %s: %w", a.Name, err)
+		}
+	}
+	return nil
+}

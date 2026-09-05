@@ -91,3 +91,15 @@ private key at `~/.dfirmedic/responder.key`. Back that file up offline.
 
 From your workstation, over the tunnel: `dfirmedic.exe teardown --workdir C:\ProgramData\DFIRMedic\<case>`
 (via a Velociraptor `Windows.System.CmdShell` collection), then delete the node in the admin console.
+
+> **Launch teardown detached.** Teardown's first step stops the Velociraptor
+> service — the very channel you are watching the collection through — so a
+> collection that waits for its own command to finish will never report a
+> result, and you lose visibility partway through with the firewall only
+> partially restored. Run it so it outlives the transport: wrap it in a
+> scheduled task (`schtasks /Create /SC ONCE /ST <t+1min> /RU SYSTEM /TR "..."`,
+> or `/Run` it immediately), or `start /b` it from the CmdShell collection, and
+> accept that the collection itself will not show a result. Confirm the outcome
+> afterwards from the host's `audit.jsonl` / `manifest.json`, or on-site — not
+> from the collection output. If the tunnel is already gone, fall back to the
+> local break-glass path (§10.1).

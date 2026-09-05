@@ -169,6 +169,16 @@ func TakeBaseline(ctx context.Context, d Deps) (*Baseline, error) {
 	if err := os.MkdirAll(d.WorkDir, 0o700); err != nil {
 		return nil, code("E20", "create workdir", err)
 	}
+	// Copy the small files breakglass/teardown need BEFORE anything can go
+	// wrong later: both open their config from --workdir only, with no kit
+	// fallback, so if the big payload copy in INSTALL dies halfway the
+	// recovery path the E30/E40 messages point at must still work.
+	for _, f := range []string{"dfirmedic.exe", "incident.json", "incident.json.sig"} {
+		if err := copyFile(filepath.Join(d.KitDir, f), filepath.Join(d.WorkDir, f)); err != nil {
+			return nil, code("E20", "copy "+f, err)
+		}
+	}
+	_ = d.Log.Record("copy", map[string]string{"from": d.KitDir, "to": d.WorkDir, "files": "dfirmedic.exe incident.json incident.json.sig"})
 	if err := d.FW.Export(ctx, filepath.Join(d.WorkDir, "firewall-original.wfw")); err != nil {
 		return nil, code("E20", "firewall export", err)
 	}
@@ -234,6 +244,21 @@ func Quarantine(ctx context.Context, d Deps, base *Baseline) error {
 		}
 		d.Man.Rules = append(d.Man.Rules, txt)
 	}
+	// Velociraptor is a separate process from tailscaled, so the tailscaled
+	// allow rule does not cover its outbound connection to the responder.
+	// The path does not exist yet (INSTALL copies it later); Windows Firewall
+	// matches a program path when a process launches, not at rule creation.
+	veloRule := win.Rule{
+		Name:          "velociraptor-egress",
+		Direction:     "Outbound",
+		Program:       filepath.Join(d.WorkDir, "payload", "velociraptor.exe"),
+		RemoteAddress: d.Inc.Tailscale.ResponderTailnetIP,
+	}
+	txt, err := d.FW.AddRule(ctx, group, veloRule)
+	if err != nil {
+		return rollback(fmt.Errorf("rule %s: %w", veloRule.Name, err))
+	}
+	d.Man.Rules = append(d.Man.Rules, txt)
 	if err := d.FW.SetAllProfiles(ctx, true, "Block", "Block"); err != nil {
 		return rollback(err)
 	}
@@ -245,15 +270,11 @@ func Install(ctx context.Context, d Deps) error {
 		return err
 	}
 	// Everything the services depend on must survive USB removal.
+	// dfirmedic.exe/incident.json/incident.json.sig were copied in BASELINE.
 	if err := copyDir(filepath.Join(d.KitDir, "payload"), filepath.Join(d.WorkDir, "payload")); err != nil {
 		return code("E40", "copy payload", err)
 	}
-	for _, f := range []string{"dfirmedic.exe", "incident.json", "incident.json.sig"} {
-		if err := copyFile(filepath.Join(d.KitDir, f), filepath.Join(d.WorkDir, f)); err != nil {
-			return code("E40", "copy "+f, err)
-		}
-	}
-	_ = d.Log.Record("copy", map[string]string{"from": d.KitDir, "to": d.WorkDir})
+	_ = d.Log.Record("copy", map[string]string{"from": filepath.Join(d.KitDir, "payload"), "to": filepath.Join(d.WorkDir, "payload")})
 
 	if err := d.TS.InstallMSI(ctx); err != nil {
 		return code("E40", "install Tailscale", err)
