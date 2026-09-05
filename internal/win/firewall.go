@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/dfirtnt/DFIRMedic/internal/runner"
@@ -246,4 +247,20 @@ func QuarantineRules(dnsResolvers []string, dnsFallbackDHCP bool, rdpFrom string
 		rules = append(rules, Rule{Name: "rdp-from-responder", Direction: "Inbound", Protocol: "TCP", LocalPort: "3389", RemoteAddress: rdpFrom})
 	}
 	return rules
+}
+
+// ServerRules are the only outbound program rules in the quarantine (spec
+// 2026-09-05 §6.3). Each names one program and one fixed destination: the
+// installed Velociraptor service, the payload copy `service install` runs
+// once, and the orchestrator for its TLS probe.
+func ServerRules(installPath, payloadExe, orchestratorExe, serverIP string, serverPort int) []Rule {
+	port := strconv.Itoa(serverPort)
+	r := func(name, prog string) Rule {
+		return Rule{Name: name, Direction: "Outbound", Program: prog, Protocol: "TCP", RemotePort: port, RemoteAddress: serverIP}
+	}
+	return []Rule{
+		r("velociraptor-egress", installPath),
+		r("velociraptor-egress-payload", payloadExe),
+		r("orchestrator-probe", orchestratorExe),
+	}
 }

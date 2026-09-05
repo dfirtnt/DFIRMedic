@@ -338,3 +338,26 @@ func TestAddRuleEmitsMultipleRemoteAddressesAsArray(t *testing.T) {
 		t.Fatalf("single address must stay a single literal: %s", txt)
 	}
 }
+
+func TestServerRulesArePinnedToOneDestination(t *testing.T) {
+	rules := ServerRules(`C:\Program Files\Velociraptor\Velociraptor.exe`, `C:\w\payload\velociraptor.exe`, `C:\w\dfirmedic.exe`, "203.0.113.10", 443)
+	if len(rules) != 3 {
+		t.Fatalf("want 3 rules, got %d", len(rules))
+	}
+	want := map[string]string{
+		"velociraptor-egress":         `C:\Program Files\Velociraptor\Velociraptor.exe`,
+		"velociraptor-egress-payload": `C:\w\payload\velociraptor.exe`,
+		"orchestrator-probe":          `C:\w\dfirmedic.exe`,
+	}
+	for _, r := range rules {
+		if want[r.Name] != r.Program {
+			t.Fatalf("rule %s program %q", r.Name, r.Program)
+		}
+		if r.Direction != "Outbound" || r.Protocol != "TCP" || r.RemotePort != "443" || r.RemoteAddress != "203.0.113.10" {
+			t.Fatalf("rule %s not pinned: %+v", r.Name, r)
+		}
+		if r.LocalPort != "" || r.Service != "" || r.IcmpType != "" {
+			t.Fatalf("rule %s has unexpected scope: %+v", r.Name, r)
+		}
+	}
+}

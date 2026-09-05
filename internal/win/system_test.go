@@ -55,3 +55,13 @@ func TestServiceExists(t *testing.T) {
 }
 
 func TestIsElevatedCompiles(t *testing.T) { _ = IsElevated() }
+
+func TestRemoveDirIfExists(t *testing.T) {
+	f := runner.NewFake()
+	if err := (Sys{R: f}).RemoveDirIfExists(context.Background(), `C:\Program Files\Velociraptor`); err != nil {
+		t.Fatal(err)
+	}
+	if !f.Called("cmd.exe", "/c", "if", "exist", `C:\Program Files\Velociraptor`, "rmdir", "/s", "/q", `C:\Program Files\Velociraptor`) {
+		t.Fatalf("unexpected argv: %v", f.Calls)
+	}
+}

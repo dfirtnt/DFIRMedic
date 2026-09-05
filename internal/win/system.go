@@ -56,3 +56,12 @@ func (s Sys) ServiceExists(ctx context.Context, name string) (bool, error) {
 	}
 	return true, nil
 }
+
+// RemoveDirIfExists deletes dir and everything under it, and is a no-op when
+// it is absent. Used by teardown to remove the Velociraptor install directory
+// that `service remove` leaves behind. Goes through cmd.exe so it is audited
+// like every other host change.
+func (s Sys) RemoveDirIfExists(ctx context.Context, dir string) error {
+	_, err := s.R.Run(ctx, "cmd.exe", "/c", "if", "exist", dir, "rmdir", "/s", "/q", dir)
+	return err
+}
