@@ -143,6 +143,35 @@ func TestPreflightNotElevated(t *testing.T) {
 	}
 }
 
+func TestPreflightRefusesExpiredConfig(t *testing.T) {
+	f := happyFake()
+	inc := strings.Replace(incJSON, `"expires_utc":"2026-09-05T22:00:00Z"`, `"expires_utc":"2020-01-01T00:00:00Z"`, 1)
+	if err := Preflight(context.Background(), deps(t, f, inc)); err == nil || !strings.Contains(err.Error(), "E12") {
+		t.Fatalf("want E12, got %v", err)
+	}
+}
+
+// TestTakeBaselineCopiesRecoveryFilesBeforeInstall guards the fix for a real
+// gap: breakglass/teardown load their config from --workdir only, with no
+// kit fallback, so dfirmedic.exe/incident.json/incident.json.sig must exist
+// there before the failure-prone payload copy in Install ever runs — not
+// only after a fully successful Run().
+func TestTakeBaselineCopiesRecoveryFilesBeforeInstall(t *testing.T) {
+	f := happyFake()
+	d := deps(t, f, incJSON)
+	if _, err := TakeBaseline(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"dfirmedic.exe", "incident.json", "incident.json.sig"} {
+		if _, err := os.Stat(filepath.Join(d.WorkDir, p)); err != nil {
+			t.Fatalf("missing %s in workdir after TakeBaseline alone: %v", p, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(d.WorkDir, "payload")); err == nil {
+		t.Fatal("payload/ must not exist yet — it's Install's job, not TakeBaseline's; a test this loose would pass even if the recovery-file copy moved back into Install")
+	}
+}
+
 func TestQuarantineRollsBackOnFailure(t *testing.T) {
 	f := happyFake()
 	f.Responses[psKey(f, "New-NetFirewallRule -Group 'DFIRMedic-C1' -DisplayName 'DFIRMedic-C1: dns-tcp'")] = runner.Result{ExitCode: 1, Stderr: "nope"}

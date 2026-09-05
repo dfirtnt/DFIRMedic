@@ -109,6 +109,27 @@ func TestExportImportUseNetsh(t *testing.T) {
 	}
 }
 
+func TestRestoreProfilesQuotesValues(t *testing.T) {
+	f := runner.NewFake()
+	fw := Firewall{R: f}
+	err := fw.RestoreProfiles(context.Background(), []ProfileState{
+		{Name: "Domain'; Start-Process notepad.exe; '", Enabled: true, DefaultInboundAction: "Block", DefaultOutboundAction: "Allow"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := ""
+	for _, c := range f.Calls {
+		all += strings.Join(c, " ") + "\n"
+	}
+	if strings.Contains(all, "Start-Process") && !strings.Contains(all, "''; Start-Process notepad.exe; ''") {
+		t.Fatalf("malicious profile name must be neutralized inside a quoted literal, got: %s", all)
+	}
+	if !strings.Contains(all, "-Profile 'Domain''; Start-Process notepad.exe; ''' -Enabled 'True'") {
+		t.Fatalf("expected properly doubled-quote escaping, got: %s", all)
+	}
+}
+
 func TestAddRuleQuotesRemoteAddress(t *testing.T) {
 	f := runner.NewFake()
 	fw := Firewall{R: f}
