@@ -9,8 +9,11 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,17 +21,17 @@ import (
 	"github.com/dfirtnt/DFIRMedic/internal/manifest"
 	"github.com/dfirtnt/DFIRMedic/internal/sign"
 	"github.com/dfirtnt/DFIRMedic/internal/teardown"
+	"github.com/dfirtnt/DFIRMedic/internal/velo"
 )
 
 type Options struct {
-	CaseID, AuthKey, Hostname, ResponderNodeKey, ResponderIP, ServerURL string
-	DNSResolvers                                                        []string
-	AllowRDP, DNSFallbackDHCP                                           bool
-	TunnelTimeoutSec, HeartbeatGraceSec                                 int
-	ContactName, ContactPhone, BreakglassCode                           string
-	TTL                                                                 time.Duration
-	PayloadDir, ExePath, FieldCardPath, OutDir, PrivKeyPath             string
-	Now                                                                 func() time.Time
+	CaseID, ServerURL                                       string
+	DNSFallbackDHCP                                         bool
+	TunnelTimeoutSec, HeartbeatGraceSec                     int
+	ContactName, ContactPhone, BreakglassCode               string
+	TTL                                                     time.Duration
+	PayloadDir, ExePath, FieldCardPath, OutDir, PrivKeyPath string
+	Now                                                     func() time.Time
 }
 
 type Result struct {
@@ -39,9 +42,6 @@ type Result struct {
 func (o *Options) defaults() {
 	if o.Now == nil {
 		o.Now = time.Now
-	}
-	if o.Hostname == "" {
-		o.Hostname = "ir-" + o.CaseID
 	}
 	if o.TunnelTimeoutSec == 0 {
 		o.TunnelTimeoutSec = 600
@@ -54,19 +54,67 @@ func (o *Options) defaults() {
 	}
 }
 
+// ServerFromURL derives the pinned destination from --server-url. The host
+// must be an IP literal: the victim has no DNS (spec 2026-09-05 §3).
+func ServerFromURL(u string) (config.Server, error) {
+	p, err := url.Parse(u)
+	if err != nil {
+		return config.Server{}, fmt.Errorf("--server-url: %w", err)
+	}
+	if p.Scheme != "https" {
+		return config.Server{}, errors.New("--server-url must be https://")
+	}
+	host := p.Hostname()
+	if net.ParseIP(host) == nil {
+		return config.Server{}, fmt.Errorf("--server-url host must be an IP literal (the victim has no DNS), got %q", host)
+	}
+	port := 443
+	if ps := p.Port(); ps != "" {
+		if port, err = strconv.Atoi(ps); err != nil || port < 1 || port > 65535 {
+			return config.Server{}, fmt.Errorf("--server-url port %q invalid", ps)
+		}
+	}
+	return config.Server{URL: u, IP: host, Port: port}, nil
+}
+
+// clientConfigFacts reads what incident.json must agree with from the shipped
+// client config: the CA fingerprint and the service install path. It also
+// refuses a client config that does not list --server-url, which is the
+// "stale yaml from the old server" mistake.
+func clientConfigFacts(payloadDir, serverURL string) (caSHA256, installPath string, err error) {
+	raw, err := os.ReadFile(filepath.Join(payloadDir, "velociraptor.client.yaml"))
+	if err != nil {
+		return "", "", fmt.Errorf("client config: %w", err)
+	}
+	if !strings.Contains(string(raw), "- "+serverURL) {
+		return "", "", fmt.Errorf("client config server_urls does not contain %s — regenerate it from the server that owns that address", serverURL)
+	}
+	caPEM, err := velo.ExtractCA(raw)
+	if err != nil {
+		return "", "", fmt.Errorf("client config: %w", err)
+	}
+	if caSHA256, err = velo.CAFingerprint(caPEM); err != nil {
+		return "", "", fmt.Errorf("client config: %w", err)
+	}
+	if installPath, err = velo.ExtractInstallPath(raw); err != nil {
+		return "", "", fmt.Errorf("client config: %w", err)
+	}
+	return caSHA256, installPath, nil
+}
+
 // incident builds the signed config. payloadManifestSHA256 must be
 // manifest.HashFile of the OutDir's already-written payload/manifest.sha256 —
 // this is what binds the (otherwise unsigned) payload manifest to the
 // signature, so a tampered payload file plus a regenerated manifest.sha256
 // cannot pass internal/stage's Preflight (its E17 check compares against
 // this same field). See internal/stage's E13/E17 checks.
-func (o Options) incident(payloadManifestSHA256 string) *config.Incident {
+func (o Options) incident(srv config.Server, installPath, payloadManifestSHA256 string) *config.Incident {
 	now := o.Now().UTC()
 	return &config.Incident{
-		Schema: 1, CaseID: o.CaseID, CreatedUTC: now, ExpiresUTC: now.Add(o.TTL),
-		Tailscale:             config.Tailscale{AuthKey: o.AuthKey, Hostname: o.Hostname, ResponderNodeKey: o.ResponderNodeKey, ResponderTailnetIP: o.ResponderIP},
-		Velociraptor:          config.Velo{ServerURL: o.ServerURL, ConfigFile: "payload/velociraptor.client.yaml"},
-		Firewall:              config.Firewall{DNSResolvers: o.DNSResolvers, AllowRDPFromResponder: o.AllowRDP, DNSFallbackToDHCP: o.DNSFallbackDHCP},
+		Schema: config.Schema, CaseID: o.CaseID, CreatedUTC: now, ExpiresUTC: now.Add(o.TTL),
+		Server:                srv,
+		Velociraptor:          config.Velo{ConfigFile: "payload/velociraptor.client.yaml", InstallPath: installPath, ServiceName: velo.ServiceName},
+		Firewall:              config.Firewall{DNSFallbackToDHCP: o.DNSFallbackDHCP},
 		Watchdog:              config.Watchdog{TunnelTimeoutSec: o.TunnelTimeoutSec, HeartbeatGraceSec: o.HeartbeatGraceSec},
 		Contact:               config.Contact{Name: o.ContactName, Phone: o.ContactPhone},
 		BreakglassCodeHash:    teardown.CodeHash(o.BreakglassCode),
@@ -82,6 +130,15 @@ func Build(o Options) (*Result, error) {
 	if st, err := os.Stat(o.PayloadDir); err != nil || !st.IsDir() {
 		return nil, fmt.Errorf("payload dir %s: not a directory", o.PayloadDir)
 	}
+	srv, err := ServerFromURL(o.ServerURL)
+	if err != nil {
+		return nil, err
+	}
+	caSHA256, installPath, err := clientConfigFacts(o.PayloadDir, o.ServerURL)
+	if err != nil {
+		return nil, err
+	}
+	srv.CASHA256 = caSHA256
 	priv, err := sign.ReadPrivateKey(o.PrivKeyPath)
 	if err != nil {
 		return nil, err
@@ -103,7 +160,7 @@ func Build(o Options) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("hash payload manifest: %w", err)
 	}
-	inc := o.incident(manifestHash)
+	inc := o.incident(srv, installPath, manifestHash)
 	if err := inc.Validate(o.Now()); err != nil {
 		return nil, fmt.Errorf("incident config: %w", err)
 	}
