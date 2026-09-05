@@ -85,6 +85,9 @@ func (c Client) Status(ctx context.Context) (Status, error) {
 
 // ResponderOnline is the tunnel-verified condition from spec §9 step 3.
 func (s Status) ResponderOnline(nodeKey string) bool {
+	if nodeKey == "" {
+		return false
+	}
 	if s.BackendState != "Running" {
 		return false
 	}

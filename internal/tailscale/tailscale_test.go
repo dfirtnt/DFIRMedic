@@ -80,3 +80,10 @@ func TestStatusUsesJSONFlag(t *testing.T) {
 		t.Fatalf("%+v %v", s, err)
 	}
 }
+
+func TestResponderOnlineRejectsEmptyNodeKey(t *testing.T) {
+	s, _ := ParseStatus(`{"BackendState":"Running","Peer":{"nodekey:x":{"PublicKey":"","Online":true}}}`)
+	if s.ResponderOnline("") {
+		t.Fatal("empty nodeKey must never be considered a verified responder")
+	}
+}
