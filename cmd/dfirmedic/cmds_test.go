@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/dfirtnt/DFIRMedic/internal/config"
+	"github.com/dfirtnt/DFIRMedic/internal/runner"
 	"github.com/dfirtnt/DFIRMedic/internal/sign"
 	"github.com/dfirtnt/DFIRMedic/internal/velo"
 )
@@ -220,6 +222,58 @@ func TestVerifyKitForConnect(t *testing.T) {
 	none := connectHost(t, "not a certificate")
 	if err := verifyKitForConnect(none); err == nil || !strings.HasPrefix(err.Error(), "E18") {
 		t.Fatalf("want E18 for an unreadable CA, got %v", err)
+	}
+}
+
+// TestVerifyKitForConnectRefusesMissingClientConfig: openHost reads the CA
+// best-effort so teardown and breakglass can open a damaged working
+// directory; connect is the only path that needs it, so it must refuse a
+// host whose CA read failed (or came back empty) before any E11/E18 check.
+func TestVerifyKitForConnectRefusesMissingClientConfig(t *testing.T) {
+	_, caErr := readClientCA(t.TempDir())
+	if caErr == nil {
+		t.Fatal("expected readClientCA to fail on an empty directory")
+	}
+
+	h := connectHost(t, "")
+	h.caErr = caErr
+	err := verifyKitForConnect(h)
+	if err == nil || !strings.HasPrefix(err.Error(), "client config missing or unreadable") {
+		t.Fatalf("want a client-config error, got %v", err)
+	}
+	if !errors.Is(err, caErr) {
+		t.Fatalf("the readClientCA error must be wrapped, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "cannot verify the server without its CA") {
+		t.Fatalf("error must say why it matters, got %v", err)
+	}
+
+	// Broken signature *and* missing CA: the CA message wins, so the
+	// operator sees the damaged working directory, not a misleading E11.
+	both := connectHost(t, "")
+	both.caErr = caErr
+	both.sig[0] ^= 0xff
+	if err := verifyKitForConnect(both); err == nil || strings.HasPrefix(err.Error(), "E11") {
+		t.Fatalf("CA error must be checked before the signature, got %v", err)
+	}
+
+	empty := connectHost(t, "")
+	if err := verifyKitForConnect(empty); err == nil || !strings.HasPrefix(err.Error(), "client config missing or unreadable") {
+		t.Fatalf("an empty CA with no recorded error must still be refused, got %v", err)
+	}
+}
+
+// TestHostWithoutClientCAIsUsableForTeardown: teardown and breakglass build
+// their Deps from the host without touching caPEM/caErr, so a host opened
+// from a working directory with no client config must still yield them.
+func TestHostWithoutClientCAIsUsableForTeardown(t *testing.T) {
+	_, caErr := readClientCA(t.TempDir())
+	h := connectHost(t, "")
+	h.caErr = caErr
+	h.r = runner.NewDryRun(nil)
+	d := teardownDeps(h, t.TempDir())
+	if d.Inc != h.inc || d.R == nil {
+		t.Fatalf("teardownDeps must not depend on the CA: %+v", d)
 	}
 }
 
