@@ -130,19 +130,50 @@ func TestBreakglassAcceptsRightCode(t *testing.T) {
 	}
 }
 
+// TestInstallDir pins the delete-path rule: installDir hands a path straight
+// to `rmdir /s /q`, so anything that does not resolve to a directory at least
+// two segments below the drive root is refused (""), not "cleaned up".
+// The drive-root cases used to be *accepted* here (`C:\Velociraptor.exe` ->
+// `C:\`), which would have wiped the whole drive.
 func TestInstallDir(t *testing.T) {
 	cases := []struct {
 		path string
 		want string
 	}{
 		{`C:\Program Files\Velociraptor\Velociraptor.exe`, `C:\Program Files\Velociraptor`},
-		{`C:\Velociraptor.exe`, `C:\`},
-		{`E:\Velociraptor.exe`, `E:\`},
+		{`C:\ProgramData\DFIRMedic\payload\Velociraptor.exe`, `C:\ProgramData\DFIRMedic\payload`},
+		{`C:\Velociraptor.exe`, ``},               // drive root: refuse
+		{`E:\Velociraptor.exe`, ``},               // drive root: refuse
+		{`C:\Program Files\Velociraptor.exe`, ``}, // would delete all of Program Files: refuse
+		{`Velociraptor.exe`, ``},                  // no separator at all: refuse
 	}
 	for _, c := range cases {
 		if got := installDir(c.path); got != c.want {
 			t.Errorf("installDir(%q) = %q, want %q", c.path, got, c.want)
 		}
+	}
+}
+
+// TestRunRefusesToDeleteShallowInstallDir proves the teardown step itself
+// never reaches RemoveDirIfExists for a shallow install path: it records a
+// skipped-for-safety error and the rest of teardown still runs.
+func TestRunRefusesToDeleteShallowInstallDir(t *testing.T) {
+	f := runner.NewFake()
+	d := deps(t, f)
+	d.Inc.Velociraptor.InstallPath = `C:\Velociraptor.exe`
+	err := Run(context.Background(), d)
+	if err == nil || !strings.Contains(err.Error(), "delete Velociraptor install directory") {
+		t.Fatalf("want a reported step failure, got %v", err)
+	}
+	if strings.Contains(all(f), "rmdir") {
+		t.Fatalf("must not run rmdir for a drive-root install path:\n%s", all(f))
+	}
+	if !strings.Contains(all(f), "advfirewall import") {
+		t.Fatal("the remaining teardown steps must still run")
+	}
+	ev, _ := os.ReadFile(filepath.Join(d.WorkDir, "audit.jsonl"))
+	if !strings.Contains(string(ev), "teardown_step_failed") || !strings.Contains(string(ev), "refusing to delete") {
+		t.Fatalf("audit log must record the refusal:\n%s", ev)
 	}
 }
 

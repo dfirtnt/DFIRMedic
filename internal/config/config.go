@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"regexp"
-	"strings"
 	"time"
 )
 
@@ -61,6 +60,15 @@ type Contact struct {
 var (
 	caseIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 	sha256Re = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	// installPathRe requires at least <drive>:\<dir>\<file>. install_path is
+	// signed, but signing only proves the responder built it - it does not
+	// make a dangerous shape safe. Teardown deletes the *parent directory* of
+	// this path with `rmdir /s /q`, so a drive-root path such as
+	// `C:\Velociraptor.exe` would target the whole of C:. Rejecting the shape
+	// here fails the kit at build/preflight time instead of at teardown time.
+	// internal/teardown.installDir applies the same pattern one level deeper
+	// (to the directory it is about to delete) as defence in depth.
+	installPathRe = regexp.MustCompile(`^[A-Za-z]:\\[^\\]+\\[^\\]+`)
 )
 
 // Load reads and parses path. The raw bytes are returned so the caller can
@@ -103,8 +111,10 @@ func (i *Incident) Validate(now time.Time) error {
 	if i.Velociraptor.ConfigFile == "" {
 		errs = append(errs, errors.New("velociraptor.config_file required"))
 	}
-	if i.Velociraptor.InstallPath == "" || !strings.Contains(i.Velociraptor.InstallPath, `:\`) {
-		errs = append(errs, errors.New("velociraptor.install_path must be an absolute Windows path"))
+	if !installPathRe.MatchString(i.Velociraptor.InstallPath) {
+		errs = append(errs, fmt.Errorf("velociraptor.install_path must be an absolute Windows path of at least "+
+			`<drive>:\<dir>\<file> (set windows_installer.install_path in the Velociraptor client config), got %q`,
+			i.Velociraptor.InstallPath))
 	}
 	if i.Velociraptor.ServiceName == "" {
 		errs = append(errs, errors.New("velociraptor.service_name required"))

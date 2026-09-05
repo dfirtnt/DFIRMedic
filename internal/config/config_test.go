@@ -119,3 +119,29 @@ func TestValidateRejectsBadServer(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateRejectsShallowInstallPath guards the teardown blast radius:
+// teardown deletes the *parent directory* of install_path, so a path whose
+// parent is a drive root (or which is not an absolute Windows path at all)
+// must never make it out of the responder's build.
+func TestValidateRejectsShallowInstallPath(t *testing.T) {
+	for name, path := range map[string]string{
+		"drive root file": `C:\\Velociraptor.exe`,
+		"drive root":      `C:\\`,
+		"bare file name":  `Velociraptor.exe`,
+		"unix path":       `/usr/local/bin/velociraptor`,
+	} {
+		s := strings.Replace(sample, `"install_path":"C:\\Program Files\\Velociraptor\\Velociraptor.exe"`, `"install_path":"`+path+`"`, 1)
+		inc, _, err := Load(write(t, s))
+		if err != nil {
+			t.Fatalf("%s: load: %v", name, err)
+		}
+		err = inc.Validate(time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC))
+		if err == nil {
+			t.Fatalf("%s: install_path %q accepted", name, path)
+		}
+		if !strings.Contains(err.Error(), "windows_installer.install_path") {
+			t.Fatalf("%s: error must name windows_installer.install_path, got %v", name, err)
+		}
+	}
+}

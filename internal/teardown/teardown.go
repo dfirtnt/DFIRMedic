@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -36,36 +37,42 @@ type Deps struct {
 	Now     func() time.Time
 }
 
+// safeInstallDirRe is deliberately one level stricter than
+// config.installPathRe: config validates the install *path*
+// (`<drive>:\<dir>\<file>`), this validates the *directory* installDir is
+// about to hand to `rmdir /s /q`, so that directory must itself be at least
+// two segments below the drive root. `C:\Program Files\Velociraptor` passes;
+// `C:\Program Files` and `C:\` do not.
+var safeInstallDirRe = regexp.MustCompile(`^[A-Za-z]:\\[^\\]+\\[^\\]+`)
+
 // installDir returns the parent directory of a Windows-style install path,
 // e.g. `C:\Program Files\Velociraptor\Velociraptor.exe` ->
-// `C:\Program Files\Velociraptor`. This deliberately does not use
-// filepath.Dir: this package is exercised by `go test` on the dev/CI host
-// (darwin or linux), where path/filepath treats "/" as the separator and
-// would silently return "." for a backslash-only path, even though the
-// compiled dfirmedic.exe (built with GOOS=windows) would handle it
-// correctly at incident-response time. config.Incident validation
-// guarantees InstallPath contains `:\`, so it is always Windows-style.
+// `C:\Program Files\Velociraptor`, or "" when that parent is not a safe
+// deletion target. This deliberately does not use filepath.Dir: this package
+// is exercised by `go test` on the dev/CI host (darwin or linux), where
+// path/filepath treats "/" as the separator and would silently return "."
+// for a backslash-only path, even though the compiled dfirmedic.exe (built
+// with GOOS=windows) would handle it correctly at incident-response time.
 //
-// A drive-root install path (e.g. `C:\Velociraptor.exe`) needs special
-// handling: the last backslash sits at index 2, so a naive path[:i] would
-// return "C:" rather than "C:\". In Windows path semantics "C:" means the
-// current directory on drive C, while "C:\" means the root of drive C -
-// feeding the former into RemoveDirIfExists (`cmd.exe /c if exist C:
-// rmdir /s /q C:`) would be an ambiguous argument to a destructive
-// filesystem operation. This mirrors exeDir in cmd/dfirmedic/cmds.go, which
-// solves the same problem for executable paths; the two can't share code
-// today because internal/teardown can't import the cmd/dfirmedic main
-// package.
+// Unlike exeDir in cmd/dfirmedic/cmds.go - which solves the same
+// separator problem for a *read* path and therefore keeps drive roots
+// (`E:\dfirmedic.exe` -> `E:\`) - this is a *delete* path: the result goes
+// straight into `cmd.exe /c if exist <dir> rmdir /s /q <dir>` on a live
+// host. The two differ on purpose. A drive-root or top-level result
+// (`C:\`, `C:` - which in Windows path semantics means "the current
+// directory on drive C" - or `C:\Program Files`) is refused with "" rather
+// than passed on; the caller then records a skipped-for-safety error
+// instead of deleting a drive or all of Program Files.
 func installDir(path string) string {
 	i := strings.LastIndexByte(path, '\\')
-	switch {
-	case i < 0:
-		return path
-	case i == 2 && path[1] == ':': // `C:\Velociraptor.exe` -> `C:\`
-		return path[:3]
-	default:
-		return path[:i]
+	if i < 0 {
+		return ""
 	}
+	dir := path[:i]
+	if !safeInstallDirRe.MatchString(dir) {
+		return ""
+	}
+	return dir
 }
 
 func CodeHash(code string) string {
@@ -96,7 +103,13 @@ func Run(ctx context.Context, d Deps) error {
 	step("stop Velociraptor", func() error { return d.Velo.Stop(ctx) })
 	step("remove Velociraptor service", func() error { return d.Velo.RemoveService(ctx) })
 	step("delete Velociraptor install directory", func() error {
-		return d.Sys.RemoveDirIfExists(ctx, installDir(d.Inc.Velociraptor.InstallPath))
+		dir := installDir(d.Inc.Velociraptor.InstallPath)
+		if dir == "" {
+			return fmt.Errorf("refusing to delete the install directory for install_path %q: "+
+				"it resolves to a drive root or a top-level directory, and this step runs "+
+				"`rmdir /s /q`; remove the Velociraptor files by hand", d.Inc.Velociraptor.InstallPath)
+		}
+		return d.Sys.RemoveDirIfExists(ctx, dir)
 	})
 	step("delete startup task", func() error { return d.Sys.DeleteStartupTask(ctx, stage.TaskNamePrefix+d.Inc.CaseID) })
 	step("remove firewall rule group", func() error { return d.FW.RemoveGroup(ctx, d.Inc.RuleGroup()) })
