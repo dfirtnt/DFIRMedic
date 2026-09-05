@@ -12,13 +12,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/dfirtnt/DFIRMedic/internal/audit"
 	"github.com/dfirtnt/DFIRMedic/internal/config"
 	"github.com/dfirtnt/DFIRMedic/internal/runner"
 	"github.com/dfirtnt/DFIRMedic/internal/stage"
-	"github.com/dfirtnt/DFIRMedic/internal/tailscale"
 	"github.com/dfirtnt/DFIRMedic/internal/velo"
 	"github.com/dfirtnt/DFIRMedic/internal/win"
 )
@@ -32,9 +32,24 @@ type Deps struct {
 	FW      win.Firewall
 	Net     win.Net
 	Sys     win.Sys
-	TS      tailscale.Client
 	Velo    velo.Client
 	Now     func() time.Time
+}
+
+// installDir returns the parent directory of a Windows-style install path,
+// e.g. `C:\Program Files\Velociraptor\Velociraptor.exe` ->
+// `C:\Program Files\Velociraptor`. This deliberately does not use
+// filepath.Dir: this package is exercised by `go test` on the dev/CI host
+// (darwin or linux), where path/filepath treats "/" as the separator and
+// would silently return "." for a backslash-only path, even though the
+// compiled dfirmedic.exe (built with GOOS=windows) would handle it
+// correctly at incident-response time. config.Incident validation
+// guarantees InstallPath contains `:\`, so it is always Windows-style.
+func installDir(path string) string {
+	if i := strings.LastIndexByte(path, '\\'); i >= 0 {
+		return path[:i]
+	}
+	return path
 }
 
 func CodeHash(code string) string {
@@ -64,9 +79,10 @@ func Run(ctx context.Context, d Deps) error {
 	}
 	step("stop Velociraptor", func() error { return d.Velo.Stop(ctx) })
 	step("remove Velociraptor service", func() error { return d.Velo.RemoveService(ctx) })
+	step("delete Velociraptor install directory", func() error {
+		return d.Sys.RemoveDirIfExists(ctx, installDir(d.Inc.Velociraptor.InstallPath))
+	})
 	step("delete startup task", func() error { return d.Sys.DeleteStartupTask(ctx, stage.TaskNamePrefix+d.Inc.CaseID) })
-	step("tailscale logout", func() error { return d.TS.Logout(ctx) })
-	step("uninstall Tailscale", func() error { return d.TS.UninstallMSI(ctx) })
 	step("remove firewall rule group", func() error { return d.FW.RemoveGroup(ctx, d.Inc.RuleGroup()) })
 	step("import original firewall policy", func() error {
 		return d.FW.Import(ctx, filepath.Join(d.WorkDir, "firewall-original.wfw"))

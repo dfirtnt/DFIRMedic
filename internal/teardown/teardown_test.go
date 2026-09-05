@@ -12,7 +12,6 @@ import (
 	"github.com/dfirtnt/DFIRMedic/internal/audit"
 	"github.com/dfirtnt/DFIRMedic/internal/config"
 	"github.com/dfirtnt/DFIRMedic/internal/runner"
-	"github.com/dfirtnt/DFIRMedic/internal/tailscale"
 	"github.com/dfirtnt/DFIRMedic/internal/velo"
 	"github.com/dfirtnt/DFIRMedic/internal/win"
 )
@@ -26,10 +25,10 @@ func deps(t *testing.T, f *runner.Fake) Deps {
 	os.WriteFile(filepath.Join(work, "firewall-original.wfw"), []byte("wfw"), 0o600)
 	log, _ := audit.Open(filepath.Join(work, "audit.jsonl"), nil)
 	inc := &config.Incident{CaseID: "C1", BreakglassCodeHash: CodeHash("hunter2")}
+	inc.Velociraptor = config.Velo{InstallPath: `C:\Program Files\Velociraptor\Velociraptor.exe`}
 	return Deps{
 		Inc: inc, WorkDir: work, R: f, Log: log, Man: &audit.Manifest{Phases: map[string]time.Time{}},
 		FW: win.Firewall{R: f}, Net: win.Net{R: f}, Sys: win.Sys{R: f},
-		TS: tailscale.Client{R: f, MSIPath: `C:\w\payload\tailscale-setup.msi`},
 		Velo: velo.Client{R: f, ExePath: "v.exe", ConfigPath: "c.yaml"},
 		Now: func() time.Time { return time.Unix(2000, 0) },
 	}
@@ -53,9 +52,8 @@ func TestRunOrder(t *testing.T) {
 	order := []string{
 		"sc.exe stop Velociraptor",
 		"v.exe --config c.yaml service remove",
+		`cmd.exe /c if exist C:\Program Files\Velociraptor rmdir /s /q C:\Program Files\Velociraptor`,
 		"schtasks.exe /Delete /TN DFIRMedic-C1 /F",
-		tailscale.ExePath + " logout",
-		`msiexec.exe /x C:\w\payload\tailscale-setup.msi /quiet /norestart`,
 		"Remove-NetFirewallRule -Group 'DFIRMedic-C1'",
 		"netsh.exe advfirewall import " + filepath.Join(d.WorkDir, "firewall-original.wfw"),
 		"Get-NetAdapter -Physical",
@@ -72,6 +70,15 @@ func TestRunOrder(t *testing.T) {
 		}
 		last = i
 	}
+	iRemove := strings.Index(a, "service remove")
+	iDir := strings.Index(a, `cmd.exe /c if exist C:\Program Files\Velociraptor rmdir /s /q C:\Program Files\Velociraptor`)
+	iTask := strings.Index(a, "schtasks.exe /Delete")
+	if !(iRemove < iDir && iDir < iTask) {
+		t.Fatalf("install dir must be removed after the service and before the task:\n%s", a)
+	}
+	if strings.Contains(a, "tailscale") || strings.Contains(a, "msiexec") {
+		t.Fatalf("no Tailscale steps:\n%s", a)
+	}
 	for _, p := range []string{"TEARDOWN", "TEARDOWN_COMPLETE"} {
 		if _, ok := d.Man.Phases[p]; !ok {
 			t.Fatalf("missing phase %s", p)
@@ -84,10 +91,10 @@ func TestRunOrder(t *testing.T) {
 
 func TestRunContinuesPastFailures(t *testing.T) {
 	f := runner.NewFake()
-	f.Responses[f.Key("msiexec.exe", "/x")] = runner.Result{ExitCode: 1603, Stderr: "fatal"}
+	f.Responses[f.Key("cmd.exe", "/c")] = runner.Result{ExitCode: 1, Stderr: "fatal"}
 	d := deps(t, f)
 	err := Run(context.Background(), d)
-	if err == nil || !strings.Contains(err.Error(), "uninstall Tailscale") {
+	if err == nil || !strings.Contains(err.Error(), "delete Velociraptor install directory") {
 		t.Fatalf("expected joined error naming the failed step, got %v", err)
 	}
 	a := all(f)
