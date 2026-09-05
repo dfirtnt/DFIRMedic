@@ -10,6 +10,7 @@ exFAT USB image or shared folder that strips Mark-of-the-Web.
 | # | Scenario | Steps | Expected |
 |---|---|---|---|
 | 1 | Happy path | VM NIC disconnected. Run `dfirmedic.exe stage`. Reconnect NIC at READY. | Beacon → CONNECTED. Velociraptor client appears in the server GUI. `audit.jsonl` chain verifies. `manifest.json` has phases PREFLIGHT…CONNECTED. |
+| 1b | DHCP after quarantine | Before row 1, add a throwaway outbound allow rule for `notepad.exe` and enable the built-in `Remote Desktop` group. Stage, reconnect. | Host gets a DHCP lease and the tunnel comes up. `Get-NetFirewallRule -Enabled True` lists only the `DFIRMedic-*` group plus rules Tailscale's installer added. The `notepad.exe` rule and `Remote Desktop` group are Disabled and named in `manifest.json` `disabled_rules`. Try IPv6 too if the lab has it; ND and DHCPv6 are covered by the group but have only been checked against the fake. |
 | 2 | Network already up | Leave the NIC connected. Run `stage`. | Immediate ERROR E14. No firewall or install changes (`Get-NetFirewallRule -Group DFIRMedic-*` empty). |
 | 3 | Watchdog timeout | Build the kit with `--tunnel-timeout 60`. Stop the responder workstation's tailscaled. Stage, reconnect. | After ~60 s: ERROR E50, all physical adapters Disabled, firewall still default-deny, Velociraptor service not running. |
 | 4 | Heartbeat loss | Build with `--heartbeat-grace 60`. After CONNECTED, stop responder tailscaled. | After ~60 s: ERROR E51, adapters Disabled, Velociraptor stopped. |

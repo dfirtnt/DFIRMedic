@@ -28,6 +28,13 @@ const incJSON = `{"schema":1,"case_id":"C1","created_utc":"2026-09-04T22:00:00Z"
 "contact":{"phone":"+1555","name":"Alex"},"breakglass_code_hash":"sha256:x",
 "payload_manifest_sha256":"__MANIFEST_HASH_PLACEHOLDER__"}`
 
+// disableScript is the prefix of the DisableOtherRules sweep for case C1.
+const disableScript = "$r = @(Get-NetFirewallRule -Enabled True | Where-Object { $_.Group -ne 'DFIRMedic-C1'"
+
+func calledPS(f *runner.Fake, script string) bool {
+	return f.Called("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
+}
+
 func psKey(f *runner.Fake, script string) string {
 	return f.Key("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
 }
@@ -38,6 +45,7 @@ func happyFake() *runner.Fake {
 	f.Responses[psKey(f, "Get-NetAdapter")] = runner.Result{Stdout: `[{"Name":"Wi-Fi","InterfaceDescription":"Intel","Status":"Disconnected"}]`}
 	f.Responses[psKey(f, "Get-NetFirewallProfile")] = runner.Result{Stdout: `[{"Name":"Domain","Enabled":1,"DefaultInboundAction":4,"DefaultOutboundAction":2}]`}
 	f.Responses[psKey(f, "Get-NetFirewallRule")] = runner.Result{Stdout: `[{"Name":"r1"}]`}
+	f.Responses[psKey(f, disableScript)] = runner.Result{Stdout: `["Core Networking - DHCP-Out","EvilPersist"]`}
 	f.Responses[f.Key("reg.exe", "query")] = runner.Result{Stdout: "    EditionID    REG_SZ    Professional\r\n"}
 	f.Responses[f.Key("sc.exe", "query", "Tailscale")] = runner.Result{ExitCode: 1060}
 	f.Responses[f.Key("sc.exe", "query", "Velociraptor")] = runner.Result{ExitCode: 1060}
@@ -172,7 +180,7 @@ func TestTakeBaselineCopiesRecoveryFilesBeforeInstall(t *testing.T) {
 	}
 }
 
-func TestQuarantineRollsBackOnFailure(t *testing.T) {
+func TestQuarantineRollsBackByImportingBaselinePolicy(t *testing.T) {
 	f := happyFake()
 	f.Responses[psKey(f, "New-NetFirewallRule -Group 'DFIRMedic-C1' -DisplayName 'DFIRMedic-C1: dns-tcp'")] = runner.Result{ExitCode: 1, Stderr: "nope"}
 	d := deps(t, f, incJSON)
@@ -184,17 +192,62 @@ func TestQuarantineRollsBackOnFailure(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "E30") {
 		t.Fatalf("want E30, got %v", err)
 	}
-	if !f.Called("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "Remove-NetFirewallRule -Group 'DFIRMedic-C1'") {
-		t.Fatal("rule group must be removed on rollback")
+	if !f.Called("netsh.exe", "advfirewall", "import", filepath.Join(d.WorkDir, "firewall-original.wfw")) {
+		t.Fatalf("rollback must import the exported baseline policy:\n%v", f.Calls)
 	}
-	if !f.Called("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "Set-NetFirewallProfile -Profile 'Domain' -Enabled 'True' -DefaultInboundAction 'Block' -DefaultOutboundAction 'Allow'") {
-		t.Fatal("profiles must be restored from baseline on rollback")
+	if calledPS(f, "Remove-NetFirewallRule -Group 'DFIRMedic-C1' -ErrorAction SilentlyContinue") {
+		t.Fatal("piecewise fallback must not run when the import succeeded")
+	}
+}
+
+func TestQuarantineRollsBackWhenDisableSweepFails(t *testing.T) {
+	f := happyFake()
+	f.Errors[psKey(f, disableScript)] = errors.New("access denied")
+	d := deps(t, f, incJSON)
+	base, err := TakeBaseline(context.Background(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = Quarantine(context.Background(), d, base)
+	if err == nil || !strings.Contains(err.Error(), "E30") || !strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("want E30 wrapping the sweep error, got %v", err)
+	}
+	if calledPS(f, "Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled 'True' -DefaultInboundAction 'Block' -DefaultOutboundAction 'Block'") {
+		t.Fatal("defaults must not be flipped when the sweep failed")
+	}
+	if !f.Called("netsh.exe", "advfirewall", "import", filepath.Join(d.WorkDir, "firewall-original.wfw")) {
+		t.Fatal("rollback must import the baseline policy")
+	}
+}
+
+func TestQuarantineRollbackFallsBackWhenImportFails(t *testing.T) {
+	f := happyFake()
+	f.Responses[psKey(f, "Set-NetFirewallProfile -Profile Domain,Private,Public")] = runner.Result{ExitCode: 1, Stderr: "nope"}
+	f.Errors[f.Key("netsh.exe", "advfirewall", "import")] = errors.New("import broke")
+	d := deps(t, f, incJSON)
+	base, err := TakeBaseline(context.Background(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = Quarantine(context.Background(), d, base)
+	if err == nil || !strings.Contains(err.Error(), "E30") || strings.Contains(err.Error(), "rollback failed") {
+		t.Fatalf("fallback succeeded, so this must be a clean E30: %v", err)
+	}
+	for _, want := range []string{
+		"Remove-NetFirewallRule -Group 'DFIRMedic-C1' -ErrorAction SilentlyContinue",
+		"Set-NetFirewallProfile -Profile 'Domain' -Enabled 'True' -DefaultInboundAction 'Block' -DefaultOutboundAction 'Allow'",
+		"Enable-NetFirewallRule -Name 'Core Networking - DHCP-Out','EvilPersist'",
+	} {
+		if !calledPS(f, want) {
+			t.Fatalf("fallback missing %q in:\n%v", want, f.Calls)
+		}
 	}
 }
 
 func TestQuarantineReportsFailedRollback(t *testing.T) {
 	f := happyFake()
 	f.Responses[psKey(f, "New-NetFirewallRule -Group 'DFIRMedic-C1' -DisplayName 'DFIRMedic-C1: dns-tcp'")] = runner.Result{ExitCode: 1, Stderr: "nope"}
+	f.Errors[f.Key("netsh.exe", "advfirewall", "import")] = errors.New("import broke")
 	f.Errors[psKey(f, "Remove-NetFirewallRule -Group 'DFIRMedic-C1' -ErrorAction SilentlyContinue")] = errors.New("access denied")
 	f.Errors[psKey(f, "Set-NetFirewallProfile -Profile 'Domain' -Enabled 'True' -DefaultInboundAction 'Block' -DefaultOutboundAction 'Allow'")] = errors.New("access denied")
 	d := deps(t, f, incJSON)
@@ -203,8 +256,8 @@ func TestQuarantineReportsFailedRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = Quarantine(context.Background(), d, base)
-	if err == nil || !strings.Contains(err.Error(), "rollback failed") {
-		t.Fatalf("want rollback-failed error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "rollback failed") || !strings.Contains(err.Error(), "import broke") {
+		t.Fatalf("want rollback-failed error naming the import failure, got %v", err)
 	}
 }
 
@@ -241,8 +294,18 @@ func TestRunHappyPath(t *testing.T) {
 	if !(iRule < iProf && iProf < iMSI && iMSI < iUp && iUp < iVelo && iVelo < iTask) {
 		t.Fatalf("bad order:\n%s", all)
 	}
-	if len(d.Man.Rules) != 4 { // tailscaled, dns-udp, dns-tcp, velociraptor-egress
-		t.Fatalf("manifest rules: %v", d.Man.Rules)
+	if len(d.Man.Rules) != 10 { // tailscaled, dhcp x4, nd x2, dns-udp, dns-tcp, velociraptor-egress
+		t.Fatalf("manifest rules (%d): %v", len(d.Man.Rules), d.Man.Rules)
+	}
+	// Pre-existing rules are disabled after the group exists (so the
+	// disable sweep can skip it) and before the default-deny flip.
+	iDisable := strings.Index(all, disableScript)
+	iLastRule := strings.LastIndex(all, "New-NetFirewallRule")
+	if iDisable < 0 || !(iLastRule < iDisable && iDisable < iProf) {
+		t.Fatalf("disable-others must run between the last rule add and the profile flip:\n%s", all)
+	}
+	if len(d.Man.DisabledRules) != 2 || d.Man.DisabledRules[1] != "EvilPersist" {
+		t.Fatalf("manifest must record which rules were disabled: %v", d.Man.DisabledRules)
 	}
 	// Velociraptor is its own process: it needs an explicit egress rule to the
 	// responder, not just the tailscaled one.

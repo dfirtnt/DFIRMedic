@@ -154,13 +154,21 @@ Applied while offline so it is already in force when the NIC comes up.
 
 - Enable Windows Firewall on Domain, Private, and Public profiles.
 - Set `DefaultOutboundAction Block` and `DefaultInboundAction Block` on all three profiles.
-- Create rule group `DFIRMedic-<case_id>` containing **allow rules only**:
+- Disable every rule that was enabled before staging and is not in the `DFIRMedic-<case_id>` group. Windows evaluates enabled allow rules regardless of the profile default, so without this sweep the built-in Core Networking rules, third-party app rules, and any allow rule the intruder persisted would still match. The disabled names are recorded in the manifest as `disabled_rules`; `firewall-original.wfw` restores them at teardown.
+- Create rule group `DFIRMedic-<case_id>` containing **allow rules only**. Because the sweep removes the built-ins, everything the host needs to get an address must be here too:
   - Outbound: `tailscaled.exe`, any protocol, any port (covers direct UDP and DERP fallback over TCP/443).
-  - Outbound: UDP/TCP 53 to the pinned resolvers in `incident.json`. Tailscale cannot bootstrap without DNS; this is easy to forget. If `dns_fallback_to_dhcp` is true, the DHCP-provided resolver is also allowed, for sites that block outbound DNS to the internet.
+  - Outbound and inbound: DHCPv4 (UDP 68/67) and DHCPv6 (UDP 546/547), scoped to `svchost.exe` service `Dhcp`. Without these the host never gets an address on reconnect and the watchdog fails closed.
+  - Outbound ICMPv6 133/135/136 and inbound 134/135/136 (IPv6 neighbor discovery). IPv4 ARP is below the firewall and needs nothing.
+  - Outbound: UDP/TCP 53 to the pinned resolvers in `incident.json`, scoped to `svchost.exe` service `Dnscache`. Tailscale cannot bootstrap without DNS; this is easy to forget. If `dns_fallback_to_dhcp` is true, port 53 to any host is also allowed with the same service scope, for sites that block outbound DNS to the internet. The service scope is what keeps that fallback from being a DNS-tunneling exfil channel for arbitrary processes.
+  - Outbound: the workdir's `velociraptor.exe`, any port, to `responder_tailnet_ip` specifically. Velociraptor is a separate process from `tailscaled` and needs its own explicit rule to reach the responder over the tunnel — this assumes the Velociraptor server and the tailnet node named by `responder_tailnet_ip`/`responder_node_key` are the same host; see the responder setup guide.
   - Inbound: TCP 3389 from `responder_tailnet_ip` only, if `allow_rdp_from_responder` is true. Remote Desktop itself is enabled in INSTALL in that case, and the change is logged.
   - Loopback.
 
 Because explicit block rules override allow rules in Windows Firewall, the group contains no block rules at all. Everything not allowed is denied by the profile default.
+
+Order matters: the group is added first (harmless while defaults are still Allow), then the sweep disables everything outside it, then the defaults flip. A failure at any point imports `firewall-original.wfw`; if the import itself fails, the group is removed, the profiles restored from `baseline.json`, and the swept rules re-enabled by name.
+
+**Known limit:** on a domain-joined host whose Group Policy sets "Apply local firewall rules" to No, the whole group is ignored and the host fails closed on reconnect. Group Policy can also re-enable swept rules on refresh. The baseline export shows the policy source; check it before staging a domain machine.
 
 **Note on Tailscale `--shields-up`:** the chat design proposed it. It is *not* used, because it blocks all inbound tailnet connections including the responder's RDP session. The tailnet ACL plus the inbound 3389 rule above achieve the same restriction more precisely.
 
@@ -196,7 +204,7 @@ The orchestrator waits for link-up on any adapter.
 5. Beacon shows `CONNECTED`. Watchdog transitions to heartbeat mode.
 6. On-site person leaves.
 
-The pre-staged default-deny covers the gap between step 1 and step 3. The window exists; nothing can traverse it except `tailscaled` and DNS.
+The pre-staged default-deny covers the gap between step 1 and step 3. The window exists; nothing can traverse it except `tailscaled`, the system resolver's DNS, and the DHCP and neighbor-discovery traffic in §8.3. Pre-existing allow rules are disabled, so an intruder's persisted rule does not survive the gap.
 
 ## 10. Failure handling
 

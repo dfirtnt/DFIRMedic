@@ -13,8 +13,8 @@ func TestQuarantineRulesAllowOnlyWhatSpecRequires(t *testing.T) {
 	var names []string
 	for _, r := range rules {
 		names = append(names, r.Name)
-		if r.Direction != "Outbound" {
-			t.Fatalf("no inbound rules without RDP: %+v", r)
+		if r.LocalPort == "3389" {
+			t.Fatalf("no RDP inbound rule without the flag: %+v", r)
 		}
 	}
 	joined := strings.Join(names, ",")
@@ -149,5 +149,169 @@ func TestAddRuleQuotesRemoteAddress(t *testing.T) {
 	// Verify the -RemoteAddress parameter has proper quoting
 	if !strings.Contains(txt, "-RemoteAddress '100.64.0.1''; Start-Process notepad.exe; '''") {
 		t.Fatalf("expected properly doubled-quote escaping in -RemoteAddress, got: %s", txt)
+	}
+}
+
+func TestAddRuleEmitsServiceAndIcmpType(t *testing.T) {
+	f := runner.NewFake()
+	fw := Firewall{R: f}
+	txt, err := fw.AddRule(context.Background(), "G", Rule{
+		Name: "dhcp-out", Direction: "Outbound", Program: SvchostPath, Service: "Dhcp", Protocol: "UDP", LocalPort: "68", RemotePort: "67",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`-Program '%SystemRoot%\System32\svchost.exe'`, "-Service 'Dhcp'", "-LocalPort '68'", "-RemotePort '67'"} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("missing %q in %s", want, txt)
+		}
+	}
+	txt, err = fw.AddRule(context.Background(), "G", Rule{
+		Name: "nd-out", Direction: "Outbound", Protocol: "ICMPv6", IcmpType: "133,135,136",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(txt, "-Protocol 'ICMPv6' -IcmpType 133,135,136") {
+		t.Fatalf("icmp types must be emitted as a bare PowerShell list: %s", txt)
+	}
+}
+
+func TestAddRuleRejectsNonNumericIcmpType(t *testing.T) {
+	f := runner.NewFake()
+	_, err := Firewall{R: f}.AddRule(context.Background(), "G", Rule{
+		Name: "x", Direction: "Outbound", Protocol: "ICMPv6", IcmpType: "133; Start-Process notepad.exe",
+	})
+	if err == nil {
+		t.Fatal("non-numeric IcmpType must be rejected before it reaches PowerShell")
+	}
+	if len(f.Calls) != 0 {
+		t.Fatalf("nothing should run: %v", f.Calls)
+	}
+}
+
+func TestQuarantineRulesScopeDNSToDnscache(t *testing.T) {
+	rules := QuarantineRules([]string{"1.1.1.1"}, true, "")
+	var seen int
+	for _, r := range rules {
+		if !strings.HasPrefix(r.Name, "dns-") {
+			continue
+		}
+		seen++
+		if r.Program != SvchostPath || r.Service != "Dnscache" {
+			t.Fatalf("DNS rule must be scoped to the system resolver, not any process: %+v", r)
+		}
+	}
+	if seen != 4 {
+		t.Fatalf("expected pinned + dhcp-fallback udp/tcp rules, saw %d", seen)
+	}
+}
+
+func TestQuarantineRulesIncludeDHCPClient(t *testing.T) {
+	rules := QuarantineRules([]string{"1.1.1.1"}, false, "")
+	want := map[string]Rule{
+		"dhcp-out":   {Direction: "Outbound", Protocol: "UDP", LocalPort: "68", RemotePort: "67"},
+		"dhcp-in":    {Direction: "Inbound", Protocol: "UDP", LocalPort: "68", RemotePort: "67"},
+		"dhcpv6-out": {Direction: "Outbound", Protocol: "UDP", LocalPort: "546", RemotePort: "547"},
+		"dhcpv6-in":  {Direction: "Inbound", Protocol: "UDP", LocalPort: "546", RemotePort: "547"},
+	}
+	for _, r := range rules {
+		w, ok := want[r.Name]
+		if !ok {
+			continue
+		}
+		if r.Direction != w.Direction || r.Protocol != w.Protocol || r.LocalPort != w.LocalPort || r.RemotePort != w.RemotePort {
+			t.Fatalf("%s: got %+v want %+v", r.Name, r, w)
+		}
+		if r.Program != SvchostPath || r.Service != "Dhcp" {
+			t.Fatalf("%s must be scoped to the DHCP client service: %+v", r.Name, r)
+		}
+		delete(want, r.Name)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing DHCP rules: %v (reconnect gets no address without them once pre-existing rules are disabled)", want)
+	}
+}
+
+func TestQuarantineRulesIncludeIPv6NeighborDiscovery(t *testing.T) {
+	rules := QuarantineRules([]string{"1.1.1.1"}, false, "")
+	var out, in bool
+	for _, r := range rules {
+		if r.Protocol != "ICMPv6" {
+			continue
+		}
+		if r.Program != "" || r.Service != "" {
+			t.Fatalf("ND is kernel traffic, must not be program-scoped: %+v", r)
+		}
+		switch {
+		case r.Direction == "Outbound" && r.IcmpType == "133,135,136":
+			out = true
+		case r.Direction == "Inbound" && r.IcmpType == "134,135,136":
+			in = true
+		default:
+			t.Fatalf("unexpected ICMPv6 rule: %+v", r)
+		}
+	}
+	if !out || !in {
+		t.Fatalf("out=%v in=%v", out, in)
+	}
+}
+
+func TestQuarantineRulesNoInboundBeyondDHCPAndNDWithoutRDP(t *testing.T) {
+	for _, r := range QuarantineRules([]string{"1.1.1.1"}, false, "") {
+		if r.Direction != "Inbound" {
+			continue
+		}
+		if !strings.HasPrefix(r.Name, "dhcp") && r.Protocol != "ICMPv6" {
+			t.Fatalf("unexpected inbound rule without RDP: %+v", r)
+		}
+	}
+}
+
+func TestDisableOtherRulesSkipsGroupAndReturnsNames(t *testing.T) {
+	f := runner.NewFake()
+	f.Responses["powershell.exe"] = runner.Result{Stdout: `["Core Networking - DHCP-Out","EvilPersist"]`}
+	names, err := Firewall{R: f}.DisableOtherRules(context.Background(), "DFIRMedic-C1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 2 || names[1] != "EvilPersist" {
+		t.Fatalf("names=%v", names)
+	}
+	script := f.Calls[0][len(f.Calls[0])-1]
+	for _, want := range []string{"Get-NetFirewallRule -Enabled True", "$_.Group -ne 'DFIRMedic-C1'", "Disable-NetFirewallRule", "ConvertTo-Json -InputObject @($r.Name) -Compress"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("missing %q in %s", want, script)
+		}
+	}
+}
+
+func TestDisableOtherRulesHandlesNoneAndSingle(t *testing.T) {
+	f := runner.NewFake()
+	names, err := Firewall{R: f}.DisableOtherRules(context.Background(), "G")
+	if err != nil || len(names) != 0 {
+		t.Fatalf("empty stdout: names=%v err=%v", names, err)
+	}
+	f.Responses["powershell.exe"] = runner.Result{Stdout: `["only"]`}
+	names, err = Firewall{R: f}.DisableOtherRules(context.Background(), "G")
+	if err != nil || len(names) != 1 || names[0] != "only" {
+		t.Fatalf("single: names=%v err=%v", names, err)
+	}
+}
+
+func TestEnableRulesQuotesEachName(t *testing.T) {
+	f := runner.NewFake()
+	if err := (Firewall{R: f}).EnableRules(context.Background(), []string{"a'b", "c"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Calls) != 1 {
+		t.Fatalf("one PS call for all names, got %d", len(f.Calls))
+	}
+	script := f.Calls[0][len(f.Calls[0])-1]
+	if !strings.Contains(script, "Enable-NetFirewallRule -Name 'a''b','c'") {
+		t.Fatalf("got %s", script)
+	}
+	if err := (Firewall{R: runner.NewFake()}).EnableRules(context.Background(), nil); err != nil {
+		t.Fatal("no names must be a no-op")
 	}
 }

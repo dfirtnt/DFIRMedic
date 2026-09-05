@@ -6,13 +6,21 @@ package win
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/dfirtnt/DFIRMedic/internal/runner"
 )
 
 const TailscaledPath = `C:\Program Files\Tailscale\tailscaled.exe`
+
+// SvchostPath is the host process for the Dnscache and Dhcp services. The
+// built-in Core Networking rules use exactly this env-var form.
+const SvchostPath = `%SystemRoot%\System32\svchost.exe`
+
+var icmpTypeList = regexp.MustCompile(`^[0-9]+(,[0-9]+)*$`)
 
 type Firewall struct{ R runner.Runner }
 
@@ -107,20 +115,33 @@ type Rule struct {
 	Name          string
 	Direction     string // Inbound | Outbound
 	Program       string
-	Protocol      string // TCP | UDP | ""
+	Service       string // Windows service short name; narrows Program to that service's svchost instance
+	Protocol      string // TCP | UDP | ICMPv6 | ""
+	IcmpType      string // comma-separated numeric ICMP types, ICMPv6 only
 	RemotePort    string
 	LocalPort     string
 	RemoteAddress string
 }
 
 func (f Firewall) AddRule(ctx context.Context, group string, r Rule) (string, error) {
+	if r.IcmpType != "" && !icmpTypeList.MatchString(r.IcmpType) {
+		return "", fmt.Errorf("rule %s: IcmpType %q is not a numeric list", r.Name, r.IcmpType)
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "New-NetFirewallRule -Group %s -DisplayName %s -Direction %s -Action Allow", psq(group), psq(group+": "+r.Name), psq(r.Direction))
 	if r.Program != "" {
 		fmt.Fprintf(&b, " -Program %s", psq(r.Program))
 	}
+	if r.Service != "" {
+		fmt.Fprintf(&b, " -Service %s", psq(r.Service))
+	}
 	if r.Protocol != "" {
 		fmt.Fprintf(&b, " -Protocol %s", psq(r.Protocol))
+	}
+	if r.IcmpType != "" {
+		// Validated above as digits and commas only, so it is safe unquoted;
+		// quoting it would hand PowerShell a single string instead of a list.
+		fmt.Fprintf(&b, " -IcmpType %s", r.IcmpType)
 	}
 	if r.RemotePort != "" {
 		fmt.Fprintf(&b, " -RemotePort %s", psq(r.RemotePort))
@@ -142,26 +163,73 @@ func (f Firewall) RemoveGroup(ctx context.Context, group string) error {
 	return err
 }
 
+// DisableOtherRules disables every enabled rule outside group and returns
+// their names. Windows evaluates enabled allow rules regardless of the
+// profile default action, so flipping the default to Block alone leaves
+// every pre-existing allow rule (built-in, third-party, or attacker-planted)
+// matching. Import of the exported policy re-enables them at teardown.
+func (f Firewall) DisableOtherRules(ctx context.Context, group string) ([]string, error) {
+	script := fmt.Sprintf("$r = @(Get-NetFirewallRule -Enabled True | Where-Object { $_.Group -ne %s }); $r | Disable-NetFirewallRule; ConvertTo-Json -InputObject @($r.Name) -Compress", psq(group))
+	res, err := runner.PS(ctx, f.R, script)
+	if err != nil {
+		return nil, err
+	}
+	txt := strings.TrimSpace(res.Stdout)
+	if txt == "" {
+		return nil, nil
+	}
+	var names []string
+	if err := json.Unmarshal([]byte(txt), &names); err != nil {
+		return nil, fmt.Errorf("parse disabled rule names: %w", err)
+	}
+	return names, nil
+}
+
+// EnableRules is the counterpart to DisableOtherRules for the rollback path.
+func (f Firewall) EnableRules(ctx context.Context, names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	quoted := make([]string, len(names))
+	for i, n := range names {
+		if n == "" {
+			return errors.New("empty rule name")
+		}
+		quoted[i] = psq(n)
+	}
+	_, err := runner.PS(ctx, f.R, "Enable-NetFirewallRule -Name "+strings.Join(quoted, ","))
+	return err
+}
+
 // QuarantineRules is the entire allow-list from spec §8.3. Allow rules only.
+// Every pre-existing rule is disabled by Quarantine, so anything the host
+// needs to get an address and reach the tailnet must be listed here.
 func QuarantineRules(dnsResolvers []string, dnsFallbackDHCP bool, rdpFrom string) []Rule {
+	dns := func(name, proto, addrs string) Rule {
+		return Rule{Name: name, Direction: "Outbound", Program: SvchostPath, Service: "Dnscache", Protocol: proto, RemotePort: "53", RemoteAddress: addrs}
+	}
 	rules := []Rule{
 		{Name: "tailscaled", Direction: "Outbound", Program: TailscaledPath},
+		// DHCP client, v4 and v6. Without these the host never gets an
+		// address on reconnect and the watchdog fails closed.
+		{Name: "dhcp-out", Direction: "Outbound", Program: SvchostPath, Service: "Dhcp", Protocol: "UDP", LocalPort: "68", RemotePort: "67"},
+		{Name: "dhcp-in", Direction: "Inbound", Program: SvchostPath, Service: "Dhcp", Protocol: "UDP", LocalPort: "68", RemotePort: "67"},
+		{Name: "dhcpv6-out", Direction: "Outbound", Program: SvchostPath, Service: "Dhcp", Protocol: "UDP", LocalPort: "546", RemotePort: "547"},
+		{Name: "dhcpv6-in", Direction: "Inbound", Program: SvchostPath, Service: "Dhcp", Protocol: "UDP", LocalPort: "546", RemotePort: "547"},
+		// IPv6 neighbor discovery: RS/NS/NA out, RA/NS/NA in. Kernel traffic,
+		// so no program scope. IPv4 ARP is below the firewall and needs nothing.
+		{Name: "nd-out", Direction: "Outbound", Protocol: "ICMPv6", IcmpType: "133,135,136"},
+		{Name: "nd-in", Direction: "Inbound", Protocol: "ICMPv6", IcmpType: "134,135,136"},
 	}
 	if len(dnsResolvers) > 0 {
 		addrs := strings.Join(dnsResolvers, ",")
-		rules = append(rules,
-			Rule{Name: "dns-udp", Direction: "Outbound", Protocol: "UDP", RemotePort: "53", RemoteAddress: addrs},
-			Rule{Name: "dns-tcp", Direction: "Outbound", Protocol: "TCP", RemotePort: "53", RemoteAddress: addrs},
-		)
+		rules = append(rules, dns("dns-udp", "UDP", addrs), dns("dns-tcp", "TCP", addrs))
 	}
 	// No RemoteAddress restriction here: the DHCP-assigned resolver's address
-	// isn't known ahead of time. This is an accepted, deliberate exposure —
-	// egress to port 53 on any host — not an oversight. See spec 8.3.
+	// isn't known ahead of time. Scoping to the Dnscache service keeps this
+	// from being a port-53 exfil channel for arbitrary processes.
 	if dnsFallbackDHCP {
-		rules = append(rules,
-			Rule{Name: "dns-dhcp-udp", Direction: "Outbound", Protocol: "UDP", RemotePort: "53"},
-			Rule{Name: "dns-dhcp-tcp", Direction: "Outbound", Protocol: "TCP", RemotePort: "53"},
-		)
+		rules = append(rules, dns("dns-dhcp-udp", "UDP", ""), dns("dns-dhcp-tcp", "TCP", ""))
 	}
 	if rdpFrom != "" {
 		rules = append(rules, Rule{Name: "rdp-from-responder", Direction: "Inbound", Protocol: "TCP", LocalPort: "3389", RemoteAddress: rdpFrom})

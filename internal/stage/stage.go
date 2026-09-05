@@ -212,8 +212,10 @@ func TakeBaseline(ctx context.Context, d Deps) (*Baseline, error) {
 }
 
 // Quarantine adds the allow-list first (harmless while defaults are still
-// Allow), then flips the profile defaults to Block. Any failure removes the
-// group and restores the baseline profile settings.
+// Allow), disables every pre-existing rule so nothing outside the group can
+// match, then flips the profile defaults to Block. Any failure imports the
+// policy exported in BASELINE; if that import fails it falls back to
+// undoing each step by hand.
 func Quarantine(ctx context.Context, d Deps, base *Baseline) error {
 	if err := d.phase("QUARANTINE"); err != nil {
 		return err
@@ -225,12 +227,22 @@ func Quarantine(ctx context.Context, d Deps, base *Baseline) error {
 	}
 	rollback := func(cause error) error {
 		_ = d.Log.Record("quarantine_rollback", map[string]string{"cause": cause.Error()})
-		removeErr := d.FW.RemoveGroup(ctx, group)
-		restoreErr := d.FW.RestoreProfiles(ctx, base.Profiles)
-		rollbackErr := errors.Join(removeErr, restoreErr)
+		importErr := d.FW.Import(ctx, filepath.Join(d.WorkDir, "firewall-original.wfw"))
+		var rollbackErr error
+		if importErr != nil {
+			rollbackErr = errors.Join(
+				d.FW.RemoveGroup(ctx, group),
+				d.FW.RestoreProfiles(ctx, base.Profiles),
+				d.FW.EnableRules(ctx, d.Man.DisabledRules),
+			)
+			if rollbackErr != nil {
+				rollbackErr = errors.Join(importErr, rollbackErr)
+			}
+		}
 		_ = d.Log.Record("quarantine_rollback_result", map[string]string{
-			"ok":    fmt.Sprintf("%v", rollbackErr == nil),
-			"error": fmt.Sprintf("%v", rollbackErr),
+			"ok":           fmt.Sprintf("%v", rollbackErr == nil),
+			"import_error": fmt.Sprintf("%v", importErr),
+			"error":        fmt.Sprintf("%v", rollbackErr),
 		})
 		if rollbackErr != nil {
 			return code("E30", "quarantine failed AND rollback failed — host may still be locked down, run breakglass", errors.Join(cause, rollbackErr))
@@ -259,6 +271,15 @@ func Quarantine(ctx context.Context, d Deps, base *Baseline) error {
 		return rollback(fmt.Errorf("rule %s: %w", veloRule.Name, err))
 	}
 	d.Man.Rules = append(d.Man.Rules, txt)
+	// Enabled allow rules match regardless of the profile default, so every
+	// rule that was on the host before us (built-in, third-party, or planted
+	// by the intruder) must be off before the default-deny flip means anything.
+	disabled, err := d.FW.DisableOtherRules(ctx, group)
+	if err != nil {
+		return rollback(fmt.Errorf("disable pre-existing rules: %w", err))
+	}
+	d.Man.DisabledRules = disabled
+	_ = d.Log.Record("rules_disabled", map[string]any{"count": len(disabled), "names": disabled})
 	if err := d.FW.SetAllProfiles(ctx, true, "Block", "Block"); err != nil {
 		return rollback(err)
 	}

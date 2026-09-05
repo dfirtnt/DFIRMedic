@@ -140,6 +140,7 @@ type Manifest struct {
 	Payload            map[string]string    `json:"payload"`
 	Baseline           json.RawMessage      `json:"baseline,omitempty"`
 	Rules              []string             `json:"rules"`
+	DisabledRules      []string             `json:"disabled_rules"`
 	Commands           []Command            `json:"commands"`
 }
 
