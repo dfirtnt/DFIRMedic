@@ -141,6 +141,7 @@ The signature is verified against an ed25519 public key compiled into `dfirmedic
 
 Capture evidence before touching anything.
 
+- **Volatile state first**, to `<workdir>\volatile\`, from Windows built-ins only: process tree with command lines (`Win32_Process`), `tasklist /v`, `netstat -anob`, `ipconfig /displaydns`, `ipconfig /all`, `arp -a`, `route print`, `query user`, `driverquery /v`. This is the state INSTALL and QUARANTINE destroy or pollute (the kit's own services, task, and connections land on top of it). Each command has a 60 s timeout; a failed command is recorded in `baseline.json` next to the file's hash and does not halt staging (`query user` is absent on Home editions). Persistent artifacts — autoruns, prefetch, scheduled tasks — are deliberately not collected here: they survive staging, and every second offline is the gap this design minimizes. They are collected over the tunnel (§12).
 - `netsh advfirewall export <workdir>\firewall-original.wfw`
 - Dump all existing firewall rules, running services, and network adapter state to JSON.
 - Record hostname, domain, OS build, system time, timezone, and clock skew against the responder's time if known.
@@ -250,6 +251,8 @@ Manifest and audit log are shipped to the responder over the tunnel at first con
 | Autoruns | `Windows.Sysinternals.Autoruns` artifact wrapping `autorunsc64.exe`. |
 | LOKI scanner | `thor-lite.exe` invoked through a custom artifact; output parsed back. Full-disk scans run for hours. |
 | Remote command execution | Velociraptor `Windows.System.CmdShell` and `Windows.System.PowerShell`. |
+| Filesystem and persistence artifacts (MFT, USN, prefetch, autoruns, hives, event logs) | Velociraptor `Windows.KapeFiles.Targets` (`_KapeTriage`), `Windows.NTFS.MFT`, `Windows.Forensics.Usn`, `Windows.Forensics.Prefetch`, `Windows.Sysinternals.Autoruns`. Run as the standard first-connect collection (responder-setup §7); nothing here is collected offline because none of it is destroyed by staging. |
+| Pre-staging volatile state | Captured offline in BASELINE (§8.2) to `<workdir>\volatile\`; ships with the workdir at first connect. |
 
 ## 13. Teardown
 

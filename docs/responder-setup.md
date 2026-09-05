@@ -98,7 +98,35 @@ private key at `~/.dfirmedic/responder.key`. Back that file up offline.
 5. Print `FIELD-CARD.txt` from the stick and hand both to the on-site person.
 6. Keep the break-glass code with you; read it over the phone only if rollback is needed.
 
-## 7. After the engagement
+## 7. First-connect collection
+
+The kit collects nothing over the wire itself; it captures pre-staging volatile state
+offline (spec §8.2) and leaves everything persistent to you, because persistent
+artifacts survive staging and every second offline is the gap the design minimizes.
+When the client appears in the GUI, run these before anything interactive, in this order:
+
+1. **`Windows.Search.FileFinder`** on `C:\ProgramData\DFIRMedic\<case>\**` with upload — gets you
+   `manifest.json`, `audit.jsonl`, `baseline.json`, and `volatile\` (process tree with command
+   lines, `netstat -anob`, DNS cache, ARP, routes, sessions, drivers, all as of before the kit
+   touched the host). Verify the audit chain and the `volatile` hashes in `baseline.json` first.
+2. **`Windows.KapeFiles.Targets`** with `_KapeTriage` — raw `$MFT`, `$LogFile`, `$UsnJrnl:$J`, hives,
+   event logs, prefetch, Amcache, LNK/jumplists. This is the classic triage image; expect
+   1–3 GB over the tunnel.
+3. **`Windows.Sysinternals.Autoruns`** — the kit's own entries are the `Tailscale` and
+   `Velociraptor` services and the `DFIRMedic-<case>` task; everything else is the host's.
+4. **`Windows.Forensics.Prefetch`**, **`Windows.NTFS.MFT`**, **`Windows.Forensics.Usn`** as parsed
+   views when you want to query rather than download.
+
+Tool-backed artifacts (Autoruns, WinPmem for `Windows.Memory.Acquisition`) fetch their binary from
+**your server's** tool cache over the tunnel, not from the internet — the victim cannot reach
+GitHub. Populate the cache once, now, while the Mac has internet: Server Artifacts → Tools, or
+launch each artifact once against any client. Otherwise the first real incident stalls on a
+download the victim cannot make.
+
+Make step 1 automatic if you like: a client event rule or a hunt scoped to label `ir-victim`
+fires it the moment a victim checks in.
+
+## 8. After the engagement
 
 From your workstation, over the tunnel: `dfirmedic.exe teardown --workdir C:\ProgramData\DFIRMedic\<case>`
 (via a Velociraptor `Windows.System.CmdShell` collection), then delete the node in the admin console.

@@ -2,6 +2,8 @@ package stage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -86,9 +88,9 @@ func deps(t *testing.T, f *runner.Fake, incText string) Deps {
 		Inc: inc, RawConfig: raw, Sig: sig, PubKey: pub, KitDir: kit, WorkDir: work, ExeSHA256: "abc",
 		R: f, Log: log, Man: man, Beacon: ui.New(&strings.Builder{}, inc.Contact),
 		FW: win.Firewall{R: f}, Net: win.Net{R: f}, Sys: win.Sys{R: f},
-		TS: tailscale.Client{R: f, MSIPath: filepath.Join(work, "payload", "tailscale-setup.msi")},
-		Velo: velo.Client{R: f, ExePath: filepath.Join(work, "payload", "velociraptor.exe"), ConfigPath: filepath.Join(work, "payload", "velociraptor.client.yaml")},
-		Now: func() time.Time { return time.Date(2026, 9, 4, 23, 0, 0, 0, time.UTC) },
+		TS:       tailscale.Client{R: f, MSIPath: filepath.Join(work, "payload", "tailscale-setup.msi")},
+		Velo:     velo.Client{R: f, ExePath: filepath.Join(work, "payload", "velociraptor.exe"), ConfigPath: filepath.Join(work, "payload", "velociraptor.client.yaml")},
+		Now:      func() time.Time { return time.Date(2026, 9, 4, 23, 0, 0, 0, time.UTC) },
 		Elevated: func() bool { return true },
 	}
 }
@@ -331,5 +333,81 @@ func TestRunHappyPath(t *testing.T) {
 	}
 	if strings.Contains(all, "fDenyTSConnections") {
 		t.Fatal("RDP must not be enabled when the flag is false")
+	}
+}
+
+func TestTakeBaselineCapturesVolatileState(t *testing.T) {
+	f := happyFake()
+	f.Responses[f.Key("netstat.exe", "-anob")] = runner.Result{Stdout: "TCP 0.0.0.0:445 LISTENING 4\r\n"}
+	f.Responses[f.Key("ipconfig.exe", "/displaydns")] = runner.Result{Stdout: "evil.example\r\n"}
+	d := deps(t, f, incJSON)
+	b, err := TakeBaseline(context.Background(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(d.WorkDir, "volatile")
+	want := []string{"processes.json", "tasklist.csv", "netstat.txt", "dnscache.txt", "ipconfig.txt", "arp.txt", "routes.txt", "sessions.txt", "drivers.csv"}
+	for _, name := range want {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("missing volatile/%s: %v", name, err)
+		}
+		if _, ok := b.Volatile[name]; !ok {
+			t.Fatalf("baseline.volatile missing %s: %v", name, b.Volatile)
+		}
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "netstat.txt"))
+	if string(got) != "TCP 0.0.0.0:445 LISTENING 4\r\n" {
+		t.Fatalf("netstat.txt = %q", got)
+	}
+	sum := sha256.Sum256(got)
+	if b.Volatile["netstat.txt"].SHA256 != hex.EncodeToString(sum[:]) || b.Volatile["netstat.txt"].Error != "" {
+		t.Fatalf("netstat.txt entry = %+v", b.Volatile["netstat.txt"])
+	}
+	// The hashes must reach the manifest so the files are bound to the signed evidence.
+	if !strings.Contains(string(d.Man.Baseline), hex.EncodeToString(sum[:])) {
+		t.Fatal("manifest baseline does not carry the volatile file hash")
+	}
+	for _, argv := range [][]string{
+		{"tasklist.exe", "/v", "/fo", "csv"}, {"netstat.exe", "-anob"}, {"ipconfig.exe", "/displaydns"},
+		{"ipconfig.exe", "/all"}, {"arp.exe", "-a"}, {"route.exe", "print"}, {"query.exe", "user"},
+		{"driverquery.exe", "/v", "/fo", "csv"},
+	} {
+		if !f.Called(argv[0], argv[1:]...) {
+			t.Fatalf("expected %v to be run", argv)
+		}
+	}
+	all := ""
+	for _, c := range f.Calls {
+		all += strings.Join(c, " ") + "\n"
+	}
+	if !strings.Contains(all, "Win32_Process") {
+		t.Fatalf("process tree must come from Win32_Process:\n%s", all)
+	}
+	// Volatile state is captured before the firewall export: it is the most
+	// perishable thing in BASELINE and nothing should run ahead of it.
+	if i, j := strings.Index(all, "netstat.exe"), strings.Index(all, "netsh.exe advfirewall export"); !(i >= 0 && j >= 0 && i < j) {
+		t.Fatalf("volatile capture must precede the firewall export:\n%s", all)
+	}
+}
+
+func TestVolatileCaptureFailureIsNonFatal(t *testing.T) {
+	f := happyFake()
+	f.Responses[f.Key("query.exe", "user")] = runner.Result{Stdout: "partial\r\n", ExitCode: 1}
+	f.Errors[f.Key("query.exe", "user")] = errors.New("'query.exe' is not recognized")
+	d := deps(t, f, incJSON)
+	b, err := TakeBaseline(context.Background(), d)
+	if err != nil {
+		t.Fatalf("one failed volatile command must not abort staging: %v", err)
+	}
+	e := b.Volatile["sessions.txt"]
+	if !strings.Contains(e.Error, "not recognized") {
+		t.Fatalf("failure must be recorded next to the file: %+v", e)
+	}
+	got, _ := os.ReadFile(filepath.Join(d.WorkDir, "volatile", "sessions.txt"))
+	if string(got) != "partial\r\n" {
+		t.Fatalf("partial output must still be written, got %q", got)
+	}
+	if b.Volatile["netstat.txt"].Error != "" {
+		t.Fatal("unrelated captures must be unaffected")
 	}
 }

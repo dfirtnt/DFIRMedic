@@ -55,6 +55,9 @@ type Baseline struct {
 	Rules     json.RawMessage    `json:"rules"`
 	Adapters  []win.Adapter      `json:"adapters"`
 	Services  string             `json:"services"`
+	// Volatile maps each file under <workdir>\volatile\ to its hash and, if
+	// the command failed, the error. See volatile.go.
+	Volatile map[string]VolatileCapture `json:"volatile"`
 }
 
 func code(c, msg string, err error) error {
@@ -179,13 +182,19 @@ func TakeBaseline(ctx context.Context, d Deps) (*Baseline, error) {
 		}
 	}
 	_ = d.Log.Record("copy", map[string]string{"from": d.KitDir, "to": d.WorkDir, "files": "dfirmedic.exe incident.json incident.json.sig"})
+	// Volatile state first: it is the most perishable evidence in BASELINE and
+	// everything after this point either reads persistent state or changes the host.
+	d.Beacon.Set(ui.Staging, "Capturing volatile state")
+	volatile, err := CaptureVolatile(ctx, d.R, filepath.Join(d.WorkDir, "volatile"))
+	if err != nil {
+		return nil, code("E20", "volatile capture", err)
+	}
 	if err := d.FW.Export(ctx, filepath.Join(d.WorkDir, "firewall-original.wfw")); err != nil {
 		return nil, code("E20", "firewall export", err)
 	}
-	b := &Baseline{TimeUTC: d.Now().UTC()}
+	b := &Baseline{TimeUTC: d.Now().UTC(), Volatile: volatile}
 	b.Hostname, _ = os.Hostname()
 	b.Timezone, _ = d.Now().Zone()
-	var err error
 	if b.EditionID, err = d.Sys.EditionID(ctx); err != nil {
 		return nil, code("E20", "edition", err)
 	}
