@@ -2,6 +2,17 @@
 
 One-time setup on your side. Everything the victim host does is in the spec (§5–§13).
 
+**One node wears three hats.** `--responder-node-key`/`--responder-ip` (§4) name a single
+tailnet node that the victim host trusts in three separate ways: it's the node
+`ResponderOnline` polls for before starting Velociraptor, it's the only source the RDP-inbound
+rule allows (if `--rdp` is set), and — since §8.3 — it's the only destination the victim's
+Velociraptor client is allowed to reach at the firewall level. Nothing enforces that this is
+also where your Velociraptor **server** actually listens (`--server-url`, §1) — if you run the
+server on a different node than the one you name here, the firewall rule that's supposed to let
+Velociraptor phone home won't cover the connection. The setup below runs all of it on one
+always-on box for exactly this reason; split them only if you also adjust §8.3's egress rule
+to match.
+
 ## 1. Velociraptor server on an always-on tailnet node
 
 Install Velociraptor on the always-on box, then in `server.config.yaml` bind
@@ -97,9 +108,11 @@ From your workstation, over the tunnel: `dfirmedic.exe teardown --workdir C:\Pro
 > collection that waits for its own command to finish will never report a
 > result, and you lose visibility partway through with the firewall only
 > partially restored. Run it so it outlives the transport: wrap it in a
-> scheduled task (`schtasks /Create /SC ONCE /ST <t+1min> /RU SYSTEM /TR "..."`,
+> scheduled task (`schtasks /Create /SC ONCE /ST <t+1min> /RU SYSTEM /Z /TR "..."`,
 > or `/Run` it immediately), or `start /b` it from the CmdShell collection, and
-> accept that the collection itself will not show a result. Confirm the outcome
-> afterwards from the host's `audit.jsonl` / `manifest.json`, or on-site — not
-> from the collection output. If the tunnel is already gone, fall back to the
-> local break-glass path (§10.1).
+> accept that the collection itself will not show a result. `/Z` deletes the
+> ad-hoc task once it's run — teardown itself only removes its own
+> `DFIRMedic-<case>` startup task, not one you create for this. Confirm the
+> outcome afterwards from the host's `audit.jsonl` / `manifest.json`, or
+> on-site — not from the collection output. If the tunnel is already gone,
+> fall back to the local break-glass path (§10.1).

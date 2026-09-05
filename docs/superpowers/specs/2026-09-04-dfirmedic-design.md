@@ -218,7 +218,7 @@ The pre-staged default-deny covers the gap between step 1 and step 3. The window
 
 ### 10.1 Break-glass
 
-`dfirmedic.exe breakglass` restores the machine to its baseline: stops and removes the Velociraptor service, logs out and uninstalls Tailscale, deletes the `DFIRMedic-<case_id>` rule group, and imports `firewall-original.wfw`. It requires a code whose SHA-256 matches `breakglass_code_hash`; the responder reads the code over the phone. This is accident prevention and audit trail, not security — an attacker with admin can undo any of this manually.
+`dfirmedic.exe breakglass` restores the machine to its baseline: stops and removes the Velociraptor service, logs out and uninstalls Tailscale, deletes the `DFIRMedic-<case_id>` rule group, imports `firewall-original.wfw`, and re-enables every physical network adapter (undoing a fail-closed watchdog trip, if one occurred — nothing else does). It requires a code whose SHA-256 matches `breakglass_code_hash`; the responder reads the code over the phone. This is accident prevention and audit trail, not security — an attacker with admin can undo any of this manually.
 
 ## 11. Chain of custody
 
@@ -226,7 +226,7 @@ The pre-staged default-deny covers the gap between step 1 and step 3. The window
 
 `<workdir>\manifest.json` records:
 
-- `case_id`, responder identity, kit version, `dfirmedic.exe` SHA-256.
+- `case_id` and `dfirmedic.exe`'s own SHA-256.
 - UTC timestamp of every phase transition.
 - SHA-256 of every payload file.
 - Every firewall rule created, with full rule text.
@@ -253,14 +253,17 @@ Manifest and audit log are shipped to the responder over the tunnel at first con
 
 ## 13. Teardown
 
-`dfirmedic.exe teardown` (invoked by the responder over the tunnel, or locally):
+`dfirmedic.exe teardown` (invoked by the responder over the tunnel, or locally). The responder ships the final manifest and audit log via a Velociraptor collection of `<workdir>` before invoking it, since teardown removes the very access that collection needs. Teardown itself, best-effort — every step runs even if an earlier one fails, and all failures join into one returned error:
 
-1. Final manifest and audit log shipped.
-2. Stop and remove the Velociraptor service.
+1. Stop and remove the Velociraptor service.
+2. Delete the startup task.
 3. `tailscale logout`; uninstall the MSI.
 4. Delete the `DFIRMedic-<case_id>` rule group.
-5. Import `firewall-original.wfw`. Restore profile default actions to their baseline values.
-6. Remove startup task and `<workdir>`, leaving only a teardown receipt if the responder asks for one.
+5. Import `firewall-original.wfw`.
+6. Re-enable every physical network adapter (undoes a fail-closed watchdog trip, if one occurred).
+7. Restore profile default actions to their baseline values.
+
+`<workdir>` itself is left in place — including the audit log and manifest — unless the responder passes `--purge`, which removes it after teardown completes.
 
 On the responder side, the tailnet node is deleted explicitly even though the ephemeral key would expire it anyway.
 
@@ -275,7 +278,7 @@ On the responder side, the tailnet node is deleted explicitly even though the ep
 ## 15. Testing
 
 - **Unit:** signature verification (valid, invalid, expired), payload hash verification, audit-log chain integrity, state machine transitions including every failure branch.
-- **Dry-run:** `dfirmedic.exe stage --dry-run` logs every action it would take, with the exact command line, without executing. Used for review and for CI.
+- **Dry-run:** `dfirmedic.exe stage --dry-run` is intended to log every action it would take, with the exact command line, without executing — for review and for CI. **Currently broken:** the dry-run runner returns a blank success for every command including `sc.exe query`, which `Preflight`'s already-installed check reads as "service present," so `stage --dry-run` fails immediately with E16 rather than reaching READY. Needs either per-command canned responses or a redesign where dry-run executes read-only queries for real and only skips state-changing commands. Not yet fixed; tracked as a known limitation, not a documented capability.
 - **Integration:** a Windows VM restored from snapshot before every run. Test matrix:
   - Happy path: stage → reconnect → tunnel verified → Velociraptor connects.
   - Watchdog: reconnect with the responder offline; adapters must go down at the timeout.
