@@ -45,11 +45,27 @@ type Deps struct {
 // compiled dfirmedic.exe (built with GOOS=windows) would handle it
 // correctly at incident-response time. config.Incident validation
 // guarantees InstallPath contains `:\`, so it is always Windows-style.
+//
+// A drive-root install path (e.g. `C:\Velociraptor.exe`) needs special
+// handling: the last backslash sits at index 2, so a naive path[:i] would
+// return "C:" rather than "C:\". In Windows path semantics "C:" means the
+// current directory on drive C, while "C:\" means the root of drive C -
+// feeding the former into RemoveDirIfExists (`cmd.exe /c if exist C:
+// rmdir /s /q C:`) would be an ambiguous argument to a destructive
+// filesystem operation. This mirrors exeDir in cmd/dfirmedic/cmds.go, which
+// solves the same problem for executable paths; the two can't share code
+// today because internal/teardown can't import the cmd/dfirmedic main
+// package.
 func installDir(path string) string {
-	if i := strings.LastIndexByte(path, '\\'); i >= 0 {
+	i := strings.LastIndexByte(path, '\\')
+	switch {
+	case i < 0:
+		return path
+	case i == 2 && path[1] == ':': // `C:\Velociraptor.exe` -> `C:\`
+		return path[:3]
+	default:
 		return path[:i]
 	}
-	return path
 }
 
 func CodeHash(code string) string {

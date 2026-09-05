@@ -130,6 +130,22 @@ func TestBreakglassAcceptsRightCode(t *testing.T) {
 	}
 }
 
+func TestInstallDir(t *testing.T) {
+	cases := []struct {
+		path string
+		want string
+	}{
+		{`C:\Program Files\Velociraptor\Velociraptor.exe`, `C:\Program Files\Velociraptor`},
+		{`C:\Velociraptor.exe`, `C:\`},
+		{`E:\Velociraptor.exe`, `E:\`},
+	}
+	for _, c := range cases {
+		if got := installDir(c.path); got != c.want {
+			t.Errorf("installDir(%q) = %q, want %q", c.path, got, c.want)
+		}
+	}
+}
+
 func TestCodeHashFormat(t *testing.T) {
 	h := CodeHash("x")
 	if !strings.HasPrefix(h, "sha256:") || len(h) != 7+64 {
