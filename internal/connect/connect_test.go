@@ -3,6 +3,7 @@ package connect
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -335,5 +336,125 @@ func TestDepsDefaultsNilManifest(t *testing.T) {
 	d.defaults()
 	if d.Man == nil || d.Man.Phases == nil {
 		t.Fatal("defaults() must initialize a nil Manifest and its Phases map")
+	}
+}
+
+// ---- probe failure diagnostics (spec §7, integration row 13) ----
+
+func auditText(t *testing.T, d Deps) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(d.WorkDir, "audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func countEvent(t *testing.T, d Deps, event string) int {
+	t.Helper()
+	return strings.Count(auditText(t, d), `"event":"`+event+`"`)
+}
+
+var errPinnedCA = errors.New("probe: certificate not signed by the pinned CA: x509: certificate signed by unknown authority")
+
+// TestProbeFailuresAreRecordedAndRateLimited: an E50 used to arrive with no
+// diagnostic at all. Every probe failure must now be attributable from
+// audit.jsonl, but a ten-minute outage polled every two seconds must not
+// write three hundred lines, and the reason that reaches the beacon must
+// carry the last probe error.
+func TestProbeFailuresAreRecordedAndRateLimited(t *testing.T) {
+	s := newSeq()
+	s.script(psPrefix("Get-NetAdapter"), adUp)
+	pr := &fakeProbe{errs: []error{errPinnedCA}}
+	c := &clock{t: time.Unix(1000, 0), step: 30 * time.Second} // 600s timeout -> ~21 probes
+	d := deps(t, s, c, pr)
+
+	err := Run(context.Background(), d)
+	if err == nil || !strings.Contains(err.Error(), "E50") {
+		t.Fatalf("want E50, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "pinned CA") {
+		t.Fatalf("E50 reason must carry the last probe error, got %q", err)
+	}
+	if !strings.Contains(d.Beacon.Render(), "pinned CA") {
+		t.Fatalf("beacon must show the probe error: %s", d.Beacon.Render())
+	}
+	a := auditText(t, d)
+	if !strings.Contains(a, `"event":"probe_failed"`) || !strings.Contains(a, "pinned CA") {
+		t.Fatalf("audit log must record probe_failed naming the error:\n%s", a)
+	}
+	if !strings.Contains(a, d.Inc.Server.IP) {
+		t.Fatalf("probe_failed must name the server:\n%s", a)
+	}
+	if n, probes := countEvent(t, d, "probe_failed"), pr.n; n >= probes || n == 0 {
+		t.Fatalf("probe_failed written %d times for %d identical failures; want rate limiting", n, probes)
+	}
+}
+
+// TestProbeFailureRecordedAgainWhenTheErrorChanges: rate limiting must not
+// hide a *different* failure - "connection refused" turning into "not signed
+// by the pinned CA" is the whole diagnosis.
+func TestProbeFailureRecordedAgainWhenTheErrorChanges(t *testing.T) {
+	s := newSeq()
+	s.script(psPrefix("Get-NetAdapter"), adUp)
+	pr := &fakeProbe{errs: []error{errDown, errDown, errPinnedCA}}
+	c := &clock{t: time.Unix(1000, 0), step: 30 * time.Second}
+	d := deps(t, s, c, pr)
+
+	if err := Run(context.Background(), d); err == nil {
+		t.Fatal("want E50")
+	}
+	a := auditText(t, d)
+	if !strings.Contains(a, "i/o timeout") || !strings.Contains(a, "pinned CA") {
+		t.Fatalf("both distinct probe errors must appear:\n%s", a)
+	}
+	if n := countEvent(t, d, "probe_failed"); n != 2 {
+		t.Fatalf("probe_failed written %d times, want 2 (one per distinct error)", n)
+	}
+}
+
+// TestHeartbeatLossRecordsProbeFailuresAndCarriesTheReason covers the E51
+// half: the watchdog reason must name why the heartbeat stopped.
+func TestHeartbeatLossRecordsProbeFailuresAndCarriesTheReason(t *testing.T) {
+	s := newSeq()
+	s.script(psPrefix("Get-NetAdapter"), adUp)
+	pr := &fakeProbe{errs: []error{nil, errPinnedCA}}
+	c := &clock{t: time.Unix(1000, 0), step: 100 * time.Second}
+	d := deps(t, s, c, pr)
+
+	err := Run(context.Background(), d)
+	if err == nil || !strings.Contains(err.Error(), "E51") {
+		t.Fatalf("want E51, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "pinned CA") {
+		t.Fatalf("E51 reason must carry the last probe error, got %q", err)
+	}
+	if countEvent(t, d, "probe_failed") == 0 {
+		t.Fatalf("heartbeat probe failures must be recorded:\n%s", auditText(t, d))
+	}
+}
+
+// TestServerVerifiedRecordedOnceOnSuccess is the deferred Task 9 ledger
+// check: the successful verification is a single, findable audit line, and
+// the heartbeat's own successes do not spam the log.
+func TestServerVerifiedRecordedOnceOnSuccess(t *testing.T) {
+	s := newSeq()
+	s.script(psPrefix("Get-NetAdapter"), adUp)
+	pr := &fakeProbe{errs: []error{nil}}
+	ctx, cancel := context.WithCancel(context.Background())
+	c := &clock{t: time.Unix(1000, 0), step: 2 * time.Second, cancel: cancel, after: 10}
+	d := deps(t, s, c, pr)
+
+	if err := Run(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	if n := countEvent(t, d, "server_verified"); n != 1 {
+		t.Fatalf("server_verified recorded %d times, want exactly 1", n)
+	}
+	if n := countEvent(t, d, "probe_failed"); n != 0 {
+		t.Fatalf("a clean run must record no probe_failed, got %d", n)
+	}
+	if !strings.Contains(auditText(t, d), `"leaf_sha256":"leaf0"`) {
+		t.Fatal("server_verified must carry the leaf fingerprint")
 	}
 }

@@ -85,18 +85,61 @@ func WaitLinkUp(ctx context.Context, d Deps) error {
 	}
 }
 
+// probeLogEvery caps how often an unchanging probe failure is written to the
+// audit log. The poll interval is two seconds and the tunnel timeout is ten
+// minutes by default, so recording every failure would bury the interesting
+// lines under ~300 identical ones.
+const probeLogEvery = 30
+
+// probeTracker turns a stream of probe results into (a) a rate-limited
+// probe_failed audit trail and (b) the last error text, so the E50/E51
+// FailClosed reason - which is what reaches the beacon and the responder -
+// says *why* the server could not be verified. Without it an E50 arrived
+// with no diagnostic at all.
+type probeTracker struct {
+	last     string // most recent failure text, for the FailClosed reason
+	recorded string // failure text of the last audit record written
+	since    int    // failures since that record
+	seen     bool   // a failure has happened since the last success
+}
+
+func (t *probeTracker) fail(d Deps, msg string) {
+	t.last = msg
+	t.since++
+	if !t.seen || msg != t.recorded || t.since >= probeLogEvery {
+		_ = d.Log.Record("probe_failed", map[string]string{"server": d.Inc.Server.IP, "error": msg})
+		t.recorded, t.since = msg, 0
+	}
+	t.seen = true
+}
+
+func (t *probeTracker) ok() { *t = probeTracker{} }
+
+// reason appends the last probe error to a FailClosed reason so the code and
+// the diagnosis travel together.
+func (t *probeTracker) reason(code string) string {
+	if t.last == "" {
+		return code
+	}
+	return fmt.Sprintf("%s (last probe error: %s)", code, t.last)
+}
+
 // serverVerified is the tunnel-verified condition from spec 2026-09-05 §7:
 // a TLS handshake with server_ip:port whose certificate chains to the CA in
 // the shipped client config. A captive portal or a stranger on that IP
-// cannot pass it.
-func (d Deps) serverVerified(ctx context.Context) (string, bool) {
+// cannot pass it. Every outcome goes through t so failures are attributable
+// after the fact.
+func (d Deps) serverVerified(ctx context.Context, t *probeTracker) (string, bool) {
 	if d.Probe == nil {
+		t.fail(d, "no prober configured")
 		return "", false
 	}
 	fp, err := d.Probe.Verify(ctx)
 	if err != nil {
+		t.fail(d, err.Error())
 		return "", false
 	}
+	t.ok()
 	return fp, true
 }
 
@@ -113,14 +156,15 @@ func Run(ctx context.Context, d Deps) error {
 	d.Beacon.Set(ui.Staging, "Connecting")
 
 	deadline := d.Now().Add(time.Duration(d.Inc.Watchdog.TunnelTimeoutSec) * time.Second)
+	pt := &probeTracker{}
 	var leaf string
 	for {
 		var ok bool
-		if leaf, ok = d.serverVerified(ctx); ok {
+		if leaf, ok = d.serverVerified(ctx, pt); ok {
 			break
 		}
 		if !d.Now().Before(deadline) {
-			return FailClosed(ctx, d, "E50 server not verified in time")
+			return FailClosed(ctx, d, pt.reason("E50 server not verified in time"))
 		}
 		if err := d.Sleep(ctx, d.Poll); err != nil {
 			d.Beacon.Set(ui.Error, fmt.Sprintf("server verification interrupted: %v", err))
@@ -147,12 +191,12 @@ func Run(ctx context.Context, d Deps) error {
 			}
 			return FailClosed(ctx, d, fmt.Sprintf("E51 server unreachable (sleep error: %v)", err))
 		}
-		if _, ok := d.serverVerified(ctx); ok {
+		if _, ok := d.serverVerified(ctx, pt); ok {
 			lastOK = d.Now()
 			continue
 		}
 		if d.Now().Sub(lastOK) > grace {
-			return FailClosed(ctx, d, "E51 server unreachable")
+			return FailClosed(ctx, d, pt.reason("E51 server unreachable"))
 		}
 	}
 }

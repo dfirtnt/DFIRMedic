@@ -191,13 +191,10 @@ func openHost(dir, workDir string, dryRun bool) (*host, error) {
 	}
 	ui.EnableVT()
 	payload := filepath.Join(workDir, "payload")
-	caPEM, _ := func() ([]byte, error) {
-		raw, err := os.ReadFile(filepath.Join(dir, "payload", "velociraptor.client.yaml"))
-		if err != nil {
-			return nil, err
-		}
-		return velo.ExtractCA(raw)
-	}()
+	caPEM, err := readClientCA(dir)
+	if err != nil {
+		return nil, err
+	}
 	return &host{
 		inc: inc, raw: raw, sig: sig, pub: pub, log: log, man: man, r: r,
 		beacon: ui.New(os.Stdout, inc.Contact),
@@ -205,6 +202,49 @@ func openHost(dir, workDir string, dryRun bool) (*host, error) {
 		caPEM: caPEM,
 		velo:  velo.Client{R: r, ExePath: filepath.Join(payload, "velociraptor.exe"), ConfigPath: filepath.Join(payload, "velociraptor.client.yaml")},
 	}, nil
+}
+
+// readClientCA pulls the pinned CA out of the shipped
+// payload/velociraptor.client.yaml. Everything downstream of it - the TLS
+// probe that decides whether the host may stay online, and the E18 check
+// that the kit was built against the signed server - is meaningless without
+// it, so a missing or unparseable client config is a hard failure with the
+// reason attached rather than a silently nil CA that surfaces ten minutes
+// later as a bare E50.
+func readClientCA(dir string) ([]byte, error) {
+	p := filepath.Join(dir, "payload", "velociraptor.client.yaml")
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		return nil, fmt.Errorf("read Velociraptor client config: %w", err)
+	}
+	pem, err := velo.ExtractCA(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", p, err)
+	}
+	return pem, nil
+}
+
+// verifyKitForConnect re-runs, on the reboot-resume path, the two checks
+// stage.Preflight makes before it touches the host: incident.json really is
+// the responder's (E11), and the client config in the payload carries the CA
+// that incident.json was signed with (E18). cmdStage reaches connect only
+// after Preflight, but `dfirmedic connect --workdir ...` - which the startup
+// task runs after a reboot - previously went straight to probing whatever
+// files happened to be in the working directory. teardown and breakglass do
+// not probe or start anything and are left alone.
+func verifyKitForConnect(h *host) error {
+	if !sign.Verify(h.pub, h.raw, h.sig) {
+		return errors.New("E11 incident.json signature invalid")
+	}
+	fp, err := velo.CAFingerprint(h.caPEM)
+	if err != nil {
+		return fmt.Errorf("E18 client config CA unreadable: %w", err)
+	}
+	if fp != h.inc.Server.CASHA256 {
+		return fmt.Errorf("E18 client config CA %s does not match signed incident.json (%s) — "+
+			"the working directory was assembled from a different server", fp, h.inc.Server.CASHA256)
+	}
+	return nil
 }
 
 // hold keeps the console open so the operator can read what went wrong; a
@@ -286,6 +326,14 @@ func cmdConnect(args []string) int {
 	h, err := openHost(*workDir, *workDir, *dry)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		hold()
+		return 1
+	}
+	if err := verifyKitForConnect(h); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		_ = h.log.Record("error", map[string]string{"error": err.Error()})
+		h.beacon.Set(ui.Error, firstWord(err.Error())+" — kit verification failed")
+		hold()
 		return 1
 	}
 	c, cancel := ctx()
