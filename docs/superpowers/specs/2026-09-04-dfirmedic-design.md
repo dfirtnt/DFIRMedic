@@ -1,5 +1,9 @@
 # DFIRMedic — Design Spec
 
+> **Superseded in part on 2026-09-05** by `2026-09-05-direct-velociraptor-design.md`, which
+> removes Tailscale from the victim. Its §9 lists which sections below no longer apply.
+> Sections not listed there remain authoritative.
+
 **Date:** 2026-09-04
 **Status:** Draft for review
 **Author:** starlord, with Claude

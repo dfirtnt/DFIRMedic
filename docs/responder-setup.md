@@ -1,69 +1,75 @@
 # Responder-side setup
 
-One-time setup on your side. Everything the victim host does is in the spec (§5–§13).
+One-time setup on your side. Everything the victim host does is in the specs
+(`docs/superpowers/specs/`). The victim reaches exactly one thing: your Velociraptor
+frontend at a fixed public IP. It never runs Tailscale and never resolves a name.
 
-**One node wears three hats.** `--responder-node-key`/`--responder-ip` (§4) name a single
-tailnet node that the victim host trusts in three separate ways: it's the node
-`ResponderOnline` polls for before starting Velociraptor, it's the only source the RDP-inbound
-rule allows (if `--rdp` is set), and — since §8.3 — it's the only destination the victim's
-Velociraptor client is allowed to reach at the firewall level. Nothing enforces that this is
-also where your Velociraptor **server** actually listens (`--server-url`, §1) — if you run the
-server on a different node than the one you name here, the firewall rule that's supposed to let
-Velociraptor phone home won't cover the connection. The setup below runs all of it on one
-always-on box for exactly this reason; split them only if you also adjust §8.3's egress rule
-to match.
+## 1. Velociraptor server on a VPS
 
-## 1. Velociraptor server on an always-on tailnet node
-
-Install Velociraptor on the always-on box, then in `server.config.yaml` bind
-every listener to that node's tailnet IP — never `0.0.0.0`:
-
-```yaml
-Frontend:
-  bind_address: 100.x.y.z
-  bind_port: 8000
-GUI:
-  bind_address: 100.x.y.z
-  bind_port: 8889
-```
-
-Generate the client config the kit ships:
+A small Linux VPS with a **static public IPv4**, nothing else on it. On it:
 
 ```bash
-velociraptor --config server.config.yaml config client > payload/velociraptor.client.yaml
+# as root
+useradd --system --home /opt/velociraptor --shell /usr/sbin/nologin velociraptor
+mkdir -p /opt/velociraptor /var/lib/velociraptor && chown velociraptor: /opt/velociraptor /var/lib/velociraptor
+# install the same release as payload/velociraptor.exe (currently 0.77.2)
+curl -fsSL -o /opt/velociraptor/velociraptor https://github.com/Velocidex/velociraptor/releases/download/v0.77.2/velociraptor-v0.77.2-linux-amd64
+chmod 0755 /opt/velociraptor/velociraptor
+# join the tailnet so you can reach the GUI; the victim never uses this
+curl -fsSL https://tailscale.com/install.sh | sh && tailscale up
+TAILNET_IP=$(tailscale ip -4)
+PUBLIC_IP=$(curl -fsS https://api.ipify.org)
+/opt/velociraptor/velociraptor config generate --merge "{
+  \"Frontend\": {\"hostname\": \"$PUBLIC_IP\", \"bind_address\": \"0.0.0.0\", \"bind_port\": 443},
+  \"GUI\": {\"bind_address\": \"$TAILNET_IP\", \"bind_port\": 8889, \"public_url\": \"https://$TAILNET_IP:8889/app/index.html\"},
+  \"API\": {\"bind_address\": \"127.0.0.1\"}, \"Monitoring\": {\"bind_address\": \"127.0.0.1\"},
+  \"Datastore\": {\"location\": \"/var/lib/velociraptor\", \"filestore_directory\": \"/var/lib/velociraptor\"},
+  \"Client\": {\"server_urls\": [\"https://$PUBLIC_IP:443/\"]}
+}" > /opt/velociraptor/server.config.yaml
+chown velociraptor: /opt/velociraptor/server.config.yaml && chmod 0600 /opt/velociraptor/server.config.yaml
+/opt/velociraptor/velociraptor --config /opt/velociraptor/server.config.yaml user add admin --role administrator
+/opt/velociraptor/velociraptor --config /opt/velociraptor/server.config.yaml service install   # systemd unit
+# host firewall: only 443 public; SSH and GUI over the tailnet
+ufw default deny incoming && ufw allow 443/tcp && ufw allow in on tailscale0 && ufw enable
 ```
 
-Its `Client.server_urls` must be `https://100.x.y.z:8000/` (the tailnet IP).
+Binding to port 443 as a non-root user needs `setcap cap_net_bind_service=+ep /opt/velociraptor/velociraptor`
+or `AmbientCapabilities=CAP_NET_BIND_SERVICE` in the unit.
 
-## 2. Tailnet ACL
-
-In the Tailscale admin console → Access controls:
-
-```json
-{
-  "tagOwners": { "tag:ir-victim": ["autogroup:admin"] },
-  "acls": [
-    { "action": "accept", "src": ["tag:ir-victim"], "dst": ["100.x.y.z:8000"] },
-    { "action": "accept", "src": ["<your workstation user or tag>"], "dst": ["tag:ir-victim:3389"] }
-  ]
-}
-```
-
-The first rule is the only reach a victim node has. The second exists only for the RDP opt-in.
-Turn **device approval** on so a stolen key cannot silently join.
-
-## 3. Exit node and domain allowlist
-
-Advertise an exit node on your side and enforce the VirusTotal / Microsoft allowlist there
-with DNS filtering. The victim never talks to those services directly; you submit hashes.
-
-## 4. Responder identity for the kit
+Confirm `Client.server_urls` in the generated config is `https://<public-ip>:443/` — an IP,
+never a hostname — then export the client config the kit ships:
 
 ```bash
-tailscale status --json --self | jq -r '.Self.PublicKey, .Self.TailscaleIPs[0]'
+/opt/velociraptor/velociraptor --config /opt/velociraptor/server.config.yaml config client > velociraptor.client.yaml
 ```
 
-Use those as `--responder-node-key` and `--responder-ip`.
+Copy that file to `payload/velociraptor.client.yaml` on your Mac. `dfirmedic build` reads the
+CA and `install_path` out of it and refuses a client config whose `server_urls` does not
+list your `--server-url`. **If the VPS IP ever changes, every kit built against it is dead.**
+
+Put the datastore on an encrypted volume; the VPS holds evidence.
+
+## 2. Tailnet
+
+Only you and the VPS. No victim tags, no victim grants, no RDP. The default
+`autogroup:member → autogroup:member` grant is enough. Keep device approval on.
+
+## 3. Tool cache
+
+Artifacts with a tool dependency (Autoruns) fetch the binary from **your server**, never
+the internet. Seed it once: GUI → View Artifacts → `Windows.Sysinternals.Autoruns` → Tools →
+Upload `payload/tools/autorunsc64.exe`, or from the VPS
+`velociraptor --config server.config.yaml tools upload --name Autorun_amd64 autorunsc64.exe`
+followed by a service restart. Memory acquisition needs nothing: WinPmem is built into the client.
+
+## 4. Sanity check from the responder side
+
+```bash
+openssl s_client -connect <public-ip>:443 </dev/null 2>/dev/null | openssl x509 -noout -issuer
+```
+
+The issuer must be your Velociraptor CA. The kit does the same check on the victim
+(spec 2026-09-05 §7); if this fails here it will fail there.
 
 ## 5. Signing key and embedded public key (once)
 
@@ -78,25 +84,21 @@ private key at `~/.dfirmedic/responder.key`. Back that file up offline.
 
 ## 6. Per incident
 
-1. Admin console → Settings → Keys → Generate auth key:
-   **Reusable: off. Ephemeral: on. Pre-authorized: on. Tags: tag:ir-victim. Expiry: 1 hour.**
-2. Format the USB **exFAT** (macOS: `diskutil eraseDisk ExFAT DFIRMEDIC /dev/diskN`).
-3. Build the kit:
+1. Format the USB **exFAT** (macOS: `diskutil eraseDisk ExFAT DFIRMEDIC /dev/diskN`).
+2. Build the kit:
 
 ```bash
 ./dist/dfirmedic build \
   --case CASE-2026-0042 \
-  --authkey tskey-auth-... \
-  --responder-node-key nodekey:... --responder-ip 100.x.y.z \
-  --server-url https://100.x.y.z:8000/ \
+  --server-url https://<public-ip>:443/ \
   --name "Your Name" --phone "+1..." \
   --breakglass-code "$(openssl rand -hex 4)" \
   --out /Volumes/DFIRMEDIC
 ```
 
-4. `./dist/dfirmedic verify --kit /Volumes/DFIRMEDIC`
-5. Print `FIELD-CARD.txt` from the stick and hand both to the on-site person.
-6. Keep the break-glass code with you; read it over the phone only if rollback is needed.
+3. `./dist/dfirmedic verify --kit /Volumes/DFIRMEDIC`
+4. Print `FIELD-CARD.txt` from the stick and hand both to the on-site person.
+5. Keep the break-glass code with you; read it over the phone only if rollback is needed.
 
 ## 7. First-connect collection
 
@@ -112,16 +114,12 @@ When the client appears in the GUI, run these before anything interactive, in th
 2. **`Windows.KapeFiles.Targets`** with `_KapeTriage` — raw `$MFT`, `$LogFile`, `$UsnJrnl:$J`, hives,
    event logs, prefetch, Amcache, LNK/jumplists. This is the classic triage image; expect
    1–3 GB over the tunnel.
-3. **`Windows.Sysinternals.Autoruns`** — the kit's own entries are the `Tailscale` and
-   `Velociraptor` services and the `DFIRMedic-<case>` task; everything else is the host's.
+3. **`Windows.Sysinternals.Autoruns`** — the kit's own entries are the `Velociraptor`
+   service and the `DFIRMedic-<case>` task; everything else is the host's.
 4. **`Windows.Forensics.Prefetch`**, **`Windows.NTFS.MFT`**, **`Windows.Forensics.Usn`** as parsed
    views when you want to query rather than download.
 
-Tool-backed artifacts (Autoruns, WinPmem for `Windows.Memory.Acquisition`) fetch their binary from
-**your server's** tool cache over the tunnel, not from the internet — the victim cannot reach
-GitHub. Populate the cache once, now, while the Mac has internet: Server Artifacts → Tools, or
-launch each artifact once against any client. Otherwise the first real incident stalls on a
-download the victim cannot make.
+Tool-backed artifacts fetch their binary from your server's tool cache, not the internet — see §3.
 
 Make step 1 automatic if you like: a client event rule or a hunt scoped to label `ir-victim`
 fires it the moment a victim checks in.
@@ -129,7 +127,7 @@ fires it the moment a victim checks in.
 ## 8. After the engagement
 
 From your workstation, over the tunnel: `dfirmedic.exe teardown --workdir C:\ProgramData\DFIRMedic\<case>`
-(via a Velociraptor `Windows.System.CmdShell` collection), then delete the node in the admin console.
+(via a Velociraptor `Windows.System.CmdShell` collection).
 
 > **Launch teardown detached.** Teardown's first step stops the Velociraptor
 > service — the very channel you are watching the collection through — so a
