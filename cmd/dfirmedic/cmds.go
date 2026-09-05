@@ -229,6 +229,7 @@ func cmdStage(args []string) int {
 	exe, _ := os.Executable()
 	o, err := parseStage(args, exe)
 	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
 	h, err := openHost(o.Kit, o.WorkDir, o.DryRun)
