@@ -2,6 +2,7 @@ package connect
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -185,5 +186,132 @@ func TestVelociraptorStartFailure(t *testing.T) {
 	err := Run(context.Background(), deps(t, s, c))
 	if err == nil || !strings.Contains(err.Error(), "E52") {
 		t.Fatalf("want E52, got %v", err)
+	}
+}
+
+// TestHeartbeatSleepErrorFailsClosed proves Finding 1's second gap is closed:
+// once Velociraptor has started, a non-cancellation Sleep error in the
+// heartbeat loop must go through FailClosed, not a bare error return that
+// would leave the host online and unmonitored.
+func TestHeartbeatSleepErrorFailsClosed(t *testing.T) {
+	s := newSeq()
+	s.script(psPrefix("Get-NetAdapter"), adUp)
+	s.script(tailscale.ExePath+" status --json", stRespOnline)
+	c := &clock{t: time.Unix(1000, 0), step: time.Second}
+	d := deps(t, s, c)
+	sleepErr := errors.New("deadline exceeded")
+	d.Sleep = func(context.Context, time.Duration) error { return sleepErr }
+
+	err := Run(context.Background(), d)
+	if err == nil || !strings.Contains(err.Error(), "E51") {
+		t.Fatalf("want E51, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "deadline exceeded") {
+		t.Fatalf("error should carry the sleep failure detail, got %v", err)
+	}
+	if !s.f.Called("sc.exe", "start", "Velociraptor") {
+		t.Fatal("Velociraptor should have started before the sleep error")
+	}
+	if !s.f.Called("sc.exe", "stop", "Velociraptor") {
+		t.Fatal("a non-cancellation sleep error must still stop Velociraptor via FailClosed")
+	}
+	if !s.f.Called("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "Disable-NetAdapter") {
+		t.Fatal("a non-cancellation sleep error must still disable adapters via FailClosed")
+	}
+	if d.Beacon.State() != ui.Error {
+		t.Fatalf("beacon must show error, got %v", d.Beacon.State())
+	}
+}
+
+// TestFailClosedDisablesAllAdaptersDespitePartialFailure proves Finding 2 is
+// closed: FailClosed must attempt every adapter even when an earlier one
+// fails to disable, instead of aborting the whole batch on the first error.
+func TestFailClosedDisablesAllAdaptersDespitePartialFailure(t *testing.T) {
+	s := newSeq()
+	twoAds := `[{"Name":"Adapter1","Status":"Up"},{"Name":"Adapter2","Status":"Up"}]`
+	s.script(psPrefix("Get-NetAdapter"), twoAds)
+	s.script(tailscale.ExePath+" status --json", stNeedsLogin)
+	s.f.Errors[s.f.Key("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+		"Disable-NetAdapter -Name 'Adapter1' -Confirm:$false")] = errors.New("access denied")
+	c := &clock{t: time.Unix(1000, 0), step: 30 * time.Second}
+	d := deps(t, s, c)
+
+	err := Run(context.Background(), d)
+	if err == nil || !strings.Contains(err.Error(), "E50") {
+		t.Fatalf("want E50, got %v", err)
+	}
+	if !s.f.Called("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+		"Disable-NetAdapter -Name 'Adapter1'") {
+		t.Fatal("adapter1 disable must have been attempted")
+	}
+	if !s.f.Called("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+		"Disable-NetAdapter -Name 'Adapter2'") {
+		t.Fatal("adapter2 disable must still be attempted even though adapter1 failed")
+	}
+}
+
+// ctxCheckingRunner simulates exec.CommandContext's real behavior of
+// refusing to even start a command when the context handed to Run is already
+// done, which the in-memory Fake does not otherwise reproduce.
+type ctxCheckingRunner struct{ inner runner.Runner }
+
+func (r ctxCheckingRunner) Run(ctx context.Context, name string, args ...string) (runner.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return runner.Result{}, err
+	}
+	return r.inner.Run(ctx, name, args...)
+}
+
+// TestFailClosedRemediatesWithCancelledContext proves Finding 3 is closed:
+// FailClosed must still run its remediation commands when invoked with (or
+// racing) an already-cancelled context, because context.WithoutCancel
+// detaches the remediation from the caller's cancellation.
+func TestFailClosedRemediatesWithCancelledContext(t *testing.T) {
+	s := newSeq()
+	s.script(psPrefix("Get-NetAdapter"), adUp)
+	c := &clock{t: time.Unix(1000, 0), step: time.Second}
+	cr := ctxCheckingRunner{inner: s}
+	d := deps(t, cr, c)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := FailClosed(ctx, d, "E99 test reason")
+	if err == nil || !strings.Contains(err.Error(), "E99") {
+		t.Fatalf("want E99, got %v", err)
+	}
+	if !s.f.Called("sc.exe", "stop", "Velociraptor") {
+		t.Fatal("Velociraptor stop must still be attempted with an already-cancelled context")
+	}
+	if !s.f.Called("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "Disable-NetAdapter") {
+		t.Fatal("adapter disable must still be attempted with an already-cancelled context")
+	}
+}
+
+// TestWaitLinkUpFailureSetsErrorBeacon proves Finding 5 is closed: a
+// pre-CONNECTED failure (here, WaitLinkUp erroring) must not leave the
+// beacon frozen on STAGING forever.
+func TestWaitLinkUpFailureSetsErrorBeacon(t *testing.T) {
+	s := newSeq()
+	s.f.Errors[psPrefix("Get-NetAdapter")] = errors.New("wmi failure")
+	c := &clock{t: time.Unix(1000, 0), step: time.Second}
+	d := deps(t, s, c)
+
+	err := Run(context.Background(), d)
+	if err == nil {
+		t.Fatal("expected an error from WaitLinkUp")
+	}
+	if d.Beacon.State() != ui.Error {
+		t.Fatalf("beacon must show ui.Error after a WaitLinkUp failure, got %v", d.Beacon.State())
+	}
+}
+
+// TestDepsDefaultsNilManifest proves the cheap nil-Manifest guard: defaults()
+// must not panic when Man is nil.
+func TestDepsDefaultsNilManifest(t *testing.T) {
+	d := Deps{}
+	d.defaults()
+	if d.Man == nil || d.Man.Phases == nil {
+		t.Fatal("defaults() must initialize a nil Manifest and its Phases map")
 	}
 }
