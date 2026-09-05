@@ -3,18 +3,19 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
 const sample = `{
-  "schema": 1,
+  "schema": 2,
   "case_id": "CASE-2026-0042",
   "created_utc": "2026-09-04T22:15:00Z",
   "expires_utc": "2026-09-05T22:15:00Z",
-  "tailscale": {"authkey":"tskey-auth-x","hostname":"ir-CASE-2026-0042","responder_node_key":"nodekey:abc","responder_tailnet_ip":"100.64.0.1"},
-  "velociraptor": {"server_url":"https://100.64.0.1:8000/","config_file":"payload/velociraptor.client.yaml"},
-  "firewall": {"dns_resolvers":["1.1.1.1","9.9.9.9"],"allow_rdp_from_responder":false,"dns_fallback_to_dhcp":false},
+  "server": {"url":"https://203.0.113.10:443/","ip":"203.0.113.10","port":443,"ca_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},
+  "velociraptor": {"config_file":"payload/velociraptor.client.yaml","install_path":"C:\\Program Files\\Velociraptor\\Velociraptor.exe","service_name":"Velociraptor"},
+  "firewall": {"dns_fallback_to_dhcp":false},
   "watchdog": {"tunnel_timeout_sec":600,"heartbeat_grace_sec":300},
   "contact": {"phone":"+15555550100","name":"Responder"},
   "breakglass_code_hash": "sha256:0000",
@@ -38,7 +39,7 @@ func TestLoadParsesAndReturnsRaw(t *testing.T) {
 	if string(raw) != sample {
 		t.Fatal("raw bytes must be returned verbatim")
 	}
-	if inc.CaseID != "CASE-2026-0042" || inc.Tailscale.ResponderNodeKey != "nodekey:abc" {
+	if inc.CaseID != "CASE-2026-0042" || inc.Server.IP != "203.0.113.10" {
 		t.Fatalf("bad parse: %+v", inc)
 	}
 	if inc.RuleGroup() != "DFIRMedic-CASE-2026-0042" {
@@ -56,9 +57,14 @@ func TestValidateRejectsExpired(t *testing.T) {
 
 func TestValidateRejectsMissingFields(t *testing.T) {
 	inc, _, _ := Load(write(t, sample))
-	inc.Tailscale.AuthKey = ""
+	inc.Server.IP = ""
 	if err := inc.Validate(inc.CreatedUTC); err == nil {
-		t.Fatal("expected missing authkey error")
+		t.Fatal("expected missing server.ip error")
+	}
+	inc, _, _ = Load(write(t, sample))
+	inc.Velociraptor.ConfigFile = ""
+	if err := inc.Validate(inc.CreatedUTC); err == nil {
+		t.Fatal("expected missing velociraptor.config_file error")
 	}
 	inc, _, _ = Load(write(t, sample))
 	inc.CaseID = "bad case id with spaces"
@@ -84,5 +90,32 @@ func TestValidateAcceptsSample(t *testing.T) {
 	inc, _, _ := Load(write(t, sample))
 	if err := inc.Validate(inc.CreatedUTC.Add(time.Hour)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestValidateRejectsSchema1(t *testing.T) {
+	inc, _, _ := Load(write(t, strings.Replace(sample, `"schema": 2`, `"schema": 1`, 1)))
+	err := inc.Validate(time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC))
+	if err == nil || !strings.Contains(err.Error(), "schema 1 unsupported") {
+		t.Fatalf("want schema error, got %v", err)
+	}
+}
+
+func TestValidateRejectsBadServer(t *testing.T) {
+	cases := map[string]string{
+		"hostname ip": strings.Replace(sample, `"ip":"203.0.113.10"`, `"ip":"velo.example.com"`, 1),
+		"port zero":   strings.Replace(sample, `"port":443`, `"port":0`, 1),
+		"bad ca hash": strings.Replace(sample, `"ca_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000"`, `"ca_sha256":"abc"`, 1),
+		"no install":  strings.Replace(sample, `"install_path":"C:\\Program Files\\Velociraptor\\Velociraptor.exe"`, `"install_path":""`, 1),
+		"no service":  strings.Replace(sample, `"service_name":"Velociraptor"`, `"service_name":""`, 1),
+	}
+	for name, js := range cases {
+		inc, _, err := Load(write(t, js))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if inc.Validate(time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC)) == nil {
+			t.Fatalf("%s: expected validation error", name)
+		}
 	}
 }
