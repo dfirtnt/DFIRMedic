@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/dfirtnt/DFIRMedic/internal/runner"
 )
@@ -51,4 +52,39 @@ func (c Client) Stop(ctx context.Context) error {
 func (c Client) RemoveService(ctx context.Context) error {
 	_, err := c.R.Run(ctx, c.ExePath, "--config", c.ConfigPath, "service", "remove")
 	return err
+}
+
+// InstalledBinaryPath returns the executable the Velociraptor service is
+// registered to run from. `service install` copies the binary to the client
+// config's install_path and registers *that*; the firewall egress rule must
+// name the same path or the client is silently blocked (seen 2026-09-05).
+func (c Client) InstalledBinaryPath(ctx context.Context) (string, error) {
+	res, err := c.R.Run(ctx, "sc.exe", "qc", ServiceName)
+	if err != nil {
+		return "", err
+	}
+	return ParseBinaryPath(res.Stdout)
+}
+
+// ParseBinaryPath pulls the executable out of `sc qc` output. The value is
+// either "quoted path" args... or an unquoted path followed by " --args".
+func ParseBinaryPath(scqc string) (string, error) {
+	for _, l := range strings.Split(scqc, "\n") {
+		k, v, ok := strings.Cut(l, ":")
+		if !ok || strings.TrimSpace(k) != "BINARY_PATH_NAME" {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		if strings.HasPrefix(v, `"`) {
+			if end := strings.Index(v[1:], `"`); end >= 0 {
+				return v[1 : end+1], nil
+			}
+			return "", errors.New("unterminated quoted BINARY_PATH_NAME")
+		}
+		if i := strings.Index(v, " --"); i >= 0 {
+			return v[:i], nil
+		}
+		return v, nil
+	}
+	return "", errors.New("BINARY_PATH_NAME not found in sc qc output")
 }

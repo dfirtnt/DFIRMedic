@@ -59,3 +59,33 @@ func TestStartAndRemove(t *testing.T) {
 		t.Fatal(all)
 	}
 }
+
+func TestParseBinaryPathQuoted(t *testing.T) {
+	out := "[SC] QueryServiceConfig SUCCESS\r\n\r\nSERVICE_NAME: Velociraptor\r\n        TYPE               : 10  WIN32_OWN_PROCESS\r\n        BINARY_PATH_NAME   : \"C:\\Program Files\\Velociraptor\\Velociraptor.exe\" --config \"C:\\Program Files\\Velociraptor\\client.config.yaml\" service run\r\n        DISPLAY_NAME       : Velociraptor\r\n"
+	got, err := ParseBinaryPath(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != `C:\Program Files\Velociraptor\Velociraptor.exe` {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestParseBinaryPathUnquoted(t *testing.T) {
+	got, err := ParseBinaryPath("        BINARY_PATH_NAME   : C:\\Velo\\Velociraptor.exe --config c.yaml service run\r\n")
+	if err != nil || got != `C:\Velo\Velociraptor.exe` {
+		t.Fatalf("got %q err %v", got, err)
+	}
+	if _, err := ParseBinaryPath("SERVICE_NAME: x\r\n"); err == nil {
+		t.Fatal("expected error when BINARY_PATH_NAME absent")
+	}
+}
+
+func TestInstalledBinaryPathRunsScQc(t *testing.T) {
+	f := runner.NewFake()
+	f.Responses[f.Key("sc.exe", "qc", "Velociraptor")] = runner.Result{Stdout: "        BINARY_PATH_NAME   : \"C:\\P\\Velociraptor.exe\" service run\r\n"}
+	got, err := Client{R: f}.InstalledBinaryPath(context.Background())
+	if err != nil || got != `C:\P\Velociraptor.exe` {
+		t.Fatalf("got %q err %v", got, err)
+	}
+}
