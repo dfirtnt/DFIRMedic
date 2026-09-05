@@ -16,19 +16,34 @@ import (
 	"github.com/dfirtnt/DFIRMedic/internal/manifest"
 	"github.com/dfirtnt/DFIRMedic/internal/runner"
 	"github.com/dfirtnt/DFIRMedic/internal/sign"
-	"github.com/dfirtnt/DFIRMedic/internal/tailscale"
 	"github.com/dfirtnt/DFIRMedic/internal/ui"
 	"github.com/dfirtnt/DFIRMedic/internal/velo"
 	"github.com/dfirtnt/DFIRMedic/internal/win"
 )
 
-const incJSON = `{"schema":1,"case_id":"C1","created_utc":"2026-09-04T22:00:00Z","expires_utc":"2026-09-05T22:00:00Z",
-"tailscale":{"authkey":"tskey-x","hostname":"ir-C1","responder_node_key":"nodekey:resp","responder_tailnet_ip":"100.64.0.1"},
-"velociraptor":{"server_url":"https://100.64.0.1:8000/","config_file":"payload/velociraptor.client.yaml"},
-"firewall":{"dns_resolvers":["1.1.1.1"],"allow_rdp_from_responder":false,"dns_fallback_to_dhcp":false},
+const incJSON = `{"schema":2,"case_id":"C1","created_utc":"2026-09-04T22:00:00Z","expires_utc":"2026-09-05T22:00:00Z",
+"server":{"url":"https://203.0.113.10:443/","ip":"203.0.113.10","port":443,"ca_sha256":"__CA_HASH_PLACEHOLDER__"},
+"velociraptor":{"config_file":"payload/velociraptor.client.yaml","install_path":"C:\\Program Files\\Velociraptor\\Velociraptor.exe","service_name":"Velociraptor"},
+"firewall":{"dns_fallback_to_dhcp":false},
 "watchdog":{"tunnel_timeout_sec":600,"heartbeat_grace_sec":300},
 "contact":{"phone":"+1555","name":"Alex"},"breakglass_code_hash":"sha256:x",
 "payload_manifest_sha256":"__MANIFEST_HASH_PLACEHOLDER__"}`
+
+// fixtureClientYAML mirrors Task 6's build_test.go fixture: a minimal but
+// well-formed velociraptor.client.yaml with a CA certificate and
+// windows_installer block, exactly what velo.ExtractCA/ExtractInstallPath
+// expect to find in a real client config.
+const fixtureClientYAML = `Client:
+  server_urls:
+  - https://203.0.113.10:443/
+  ca_certificate: |
+    -----BEGIN CERTIFICATE-----
+    AAAA
+    -----END CERTIFICATE-----
+  windows_installer:
+    service_name: Velociraptor
+    install_path: $ProgramFiles\Velociraptor\Velociraptor.exe
+`
 
 // disableScript is the prefix of the DisableOtherRules sweep for case C1.
 const disableScript = "$r = @(Get-NetFirewallRule -Enabled True | Where-Object { $_.Group -ne 'DFIRMedic-C1'"
@@ -49,9 +64,9 @@ func happyFake() *runner.Fake {
 	f.Responses[psKey(f, "Get-NetFirewallRule")] = runner.Result{Stdout: `[{"Name":"r1"}]`}
 	f.Responses[psKey(f, disableScript)] = runner.Result{Stdout: `["Core Networking - DHCP-Out","EvilPersist"]`}
 	f.Responses[f.Key("reg.exe", "query")] = runner.Result{Stdout: "    EditionID    REG_SZ    Professional\r\n"}
-	f.Responses[f.Key("sc.exe", "query", "Tailscale")] = runner.Result{ExitCode: 1060}
 	f.Responses[f.Key("sc.exe", "query", "Velociraptor")] = runner.Result{ExitCode: 1060}
 	f.Responses[f.Key("sc.exe", "query", "type=")] = runner.Result{Stdout: "SERVICE_NAME: Spooler\r\n"}
+	f.Responses[f.Key("sc.exe", "qc", "Velociraptor")] = runner.Result{Stdout: "        BINARY_PATH_NAME   : \"C:\\Program Files\\Velociraptor\\Velociraptor.exe\" --config \"C:\\Program Files\\Velociraptor\\client.config.yaml\" service run\r\n"}
 	return f
 }
 
@@ -61,8 +76,7 @@ func deps(t *testing.T, f *runner.Fake, incText string) Deps {
 	work := filepath.Join(t.TempDir(), "work")
 	os.MkdirAll(filepath.Join(kit, "payload", "tools"), 0o755)
 	os.WriteFile(filepath.Join(kit, "payload", "velociraptor.exe"), []byte("velo"), 0o755)
-	os.WriteFile(filepath.Join(kit, "payload", "velociraptor.client.yaml"), []byte("cfg"), 0o644)
-	os.WriteFile(filepath.Join(kit, "payload", "tailscale-setup.msi"), []byte("msi"), 0o644)
+	os.WriteFile(filepath.Join(kit, "payload", "velociraptor.client.yaml"), []byte(fixtureClientYAML), 0o644)
 	os.WriteFile(filepath.Join(kit, "payload", "tools", "thor-lite.exe"), []byte("thor"), 0o755)
 	os.WriteFile(filepath.Join(kit, "dfirmedic.exe"), []byte("exe"), 0o755)
 	if _, err := manifest.Write(filepath.Join(kit, "payload")); err != nil {
@@ -73,6 +87,15 @@ func deps(t *testing.T, f *runner.Fake, incText string) Deps {
 		t.Fatal(err)
 	}
 	incText = strings.Replace(incText, "__MANIFEST_HASH_PLACEHOLDER__", "sha256:"+manifestHash, 1)
+	caPEM, err := velo.ExtractCA([]byte(fixtureClientYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	caFP, err := velo.CAFingerprint(caPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incText = strings.Replace(incText, "__CA_HASH_PLACEHOLDER__", caFP, 1)
 	pub, priv, _ := sign.GenerateKeypair()
 	os.WriteFile(filepath.Join(kit, "incident.json"), []byte(incText), 0o600)
 	inc, raw, err := config.Load(filepath.Join(kit, "incident.json"))
@@ -88,11 +111,40 @@ func deps(t *testing.T, f *runner.Fake, incText string) Deps {
 		Inc: inc, RawConfig: raw, Sig: sig, PubKey: pub, KitDir: kit, WorkDir: work, ExeSHA256: "abc",
 		R: f, Log: log, Man: man, Beacon: ui.New(&strings.Builder{}, inc.Contact),
 		FW: win.Firewall{R: f}, Net: win.Net{R: f}, Sys: win.Sys{R: f},
-		TS:       tailscale.Client{R: f, MSIPath: filepath.Join(work, "payload", "tailscale-setup.msi")},
 		Velo:     velo.Client{R: f, ExePath: filepath.Join(work, "payload", "velociraptor.exe"), ConfigPath: filepath.Join(work, "payload", "velociraptor.client.yaml")},
 		Now:      func() time.Time { return time.Date(2026, 9, 4, 23, 0, 0, 0, time.UTC) },
 		Elevated: func() bool { return true },
 	}
+}
+
+// resign mirrors the tail of deps: it recomputes the payload manifest hash
+// (the caller has just rewritten a payload file and re-run manifest.Write),
+// rewrites incident.json's payload_manifest_sha256 to match, re-signs with a
+// fresh keypair, and returns Deps updated to match. Used by tests that
+// tamper with kit contents after the kit has already been built by deps.
+func resign(t *testing.T, d Deps) Deps {
+	t.Helper()
+	manifestHash, err := manifest.HashFile(filepath.Join(d.KitDir, "payload", manifest.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(d.KitDir, "incident.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newText := strings.Replace(string(raw), d.Inc.PayloadManifestSHA256, "sha256:"+manifestHash, 1)
+	pub, priv, _ := sign.GenerateKeypair()
+	if err := os.WriteFile(filepath.Join(d.KitDir, "incident.json"), []byte(newText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inc, rawNew, err := config.Load(filepath.Join(d.KitDir, "incident.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := sign.Sign(priv, rawNew)
+	sign.WriteSig(filepath.Join(d.KitDir, "incident.json.sig"), sig)
+	d.Inc, d.RawConfig, d.Sig, d.PubKey = inc, rawNew, sig, pub
+	return d
 }
 
 func TestPreflightRefusesWhenNetworkUp(t *testing.T) {
@@ -130,18 +182,9 @@ func TestPreflightRefusesTamperedManifestHash(t *testing.T) {
 
 func TestPreflightRefusesExistingInstall(t *testing.T) {
 	f := happyFake()
-	f.Responses[f.Key("sc.exe", "query", "Tailscale")] = runner.Result{Stdout: "SERVICE_NAME: Tailscale"}
+	f.Responses[f.Key("sc.exe", "query", "Velociraptor")] = runner.Result{Stdout: "SERVICE_NAME: Velociraptor"}
 	if err := Preflight(context.Background(), deps(t, f, incJSON)); err == nil || !strings.Contains(err.Error(), "E16") {
 		t.Fatalf("want E16, got %v", err)
-	}
-}
-
-func TestPreflightRefusesHomeEditionWithRDP(t *testing.T) {
-	f := happyFake()
-	f.Responses[f.Key("reg.exe", "query")] = runner.Result{Stdout: "    EditionID    REG_SZ    Core\r\n"}
-	inc := strings.Replace(incJSON, `"allow_rdp_from_responder":false`, `"allow_rdp_from_responder":true`, 1)
-	if err := Preflight(context.Background(), deps(t, f, inc)); err == nil || !strings.Contains(err.Error(), "E15") {
-		t.Fatalf("want E15, got %v", err)
 	}
 }
 
@@ -184,7 +227,7 @@ func TestTakeBaselineCopiesRecoveryFilesBeforeInstall(t *testing.T) {
 
 func TestQuarantineRollsBackByImportingBaselinePolicy(t *testing.T) {
 	f := happyFake()
-	f.Responses[psKey(f, "New-NetFirewallRule -Group 'DFIRMedic-C1' -DisplayName 'DFIRMedic-C1: dns-tcp'")] = runner.Result{ExitCode: 1, Stderr: "nope"}
+	f.Responses[psKey(f, "New-NetFirewallRule -Group 'DFIRMedic-C1' -DisplayName 'DFIRMedic-C1: dhcp-out'")] = runner.Result{ExitCode: 1, Stderr: "nope"}
 	d := deps(t, f, incJSON)
 	base, err := TakeBaseline(context.Background(), d)
 	if err != nil {
@@ -248,7 +291,7 @@ func TestQuarantineRollbackFallsBackWhenImportFails(t *testing.T) {
 
 func TestQuarantineReportsFailedRollback(t *testing.T) {
 	f := happyFake()
-	f.Responses[psKey(f, "New-NetFirewallRule -Group 'DFIRMedic-C1' -DisplayName 'DFIRMedic-C1: dns-tcp'")] = runner.Result{ExitCode: 1, Stderr: "nope"}
+	f.Responses[psKey(f, "New-NetFirewallRule -Group 'DFIRMedic-C1' -DisplayName 'DFIRMedic-C1: dhcp-out'")] = runner.Result{ExitCode: 1, Stderr: "nope"}
 	f.Errors[f.Key("netsh.exe", "advfirewall", "import")] = errors.New("import broke")
 	f.Errors[psKey(f, "Remove-NetFirewallRule -Group 'DFIRMedic-C1' -ErrorAction SilentlyContinue")] = errors.New("access denied")
 	f.Errors[psKey(f, "Set-NetFirewallProfile -Profile 'Domain' -Enabled 'True' -DefaultInboundAction 'Block' -DefaultOutboundAction 'Allow'")] = errors.New("access denied")
@@ -289,14 +332,12 @@ func TestRunHappyPath(t *testing.T) {
 	}
 	iRule := strings.Index(all, "New-NetFirewallRule")
 	iProf := strings.Index(all, "Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled 'True' -DefaultInboundAction 'Block' -DefaultOutboundAction 'Block'")
-	iMSI := strings.Index(all, "msiexec.exe /i")
-	iUp := strings.Index(all, "tailscale.exe up")
 	iVelo := strings.Index(all, "service install")
 	iTask := strings.Index(all, "schtasks.exe /Create")
-	if !(iRule < iProf && iProf < iMSI && iMSI < iUp && iUp < iVelo && iVelo < iTask) {
+	if !(iRule < iProf && iProf < iVelo && iVelo < iTask) {
 		t.Fatalf("bad order:\n%s", all)
 	}
-	if len(d.Man.Rules) != 10 { // tailscaled, dhcp x4, nd x2, dns-udp, dns-tcp, velociraptor-egress
+	if len(d.Man.Rules) != 9 { // dhcp x4, nd x2 (QuarantineRules) + 3 server egress rules (ServerRules)
 		t.Fatalf("manifest rules (%d): %v", len(d.Man.Rules), d.Man.Rules)
 	}
 	// Pre-existing rules are disabled after the group exists (so the
@@ -309,15 +350,23 @@ func TestRunHappyPath(t *testing.T) {
 	if len(d.Man.DisabledRules) != 2 || d.Man.DisabledRules[1] != "EvilPersist" {
 		t.Fatalf("manifest must record which rules were disabled: %v", d.Man.DisabledRules)
 	}
-	// Velociraptor is its own process: it needs an explicit egress rule to the
-	// responder, not just the tailscaled one.
-	veloRule := "New-NetFirewallRule -Group 'DFIRMedic-C1' -DisplayName 'DFIRMedic-C1: velociraptor-egress' -Direction 'Outbound' -Action Allow -Program " +
-		"'" + filepath.Join(d.WorkDir, "payload", "velociraptor.exe") + "' -RemoteAddress '100.64.0.1' | Out-Null"
-	if !f.Called("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", veloRule) {
-		t.Fatalf("missing velociraptor egress rule in:\n%s", all)
+	// The victim reaches exactly one destination, by three named programs:
+	// the installed Velociraptor service, the not-yet-run payload copy
+	// `service install` uses once, and the orchestrator's TLS probe.
+	for _, want := range []string{
+		"-DisplayName 'DFIRMedic-C1: velociraptor-egress' -Direction 'Outbound' -Action Allow -Program 'C:\\Program Files\\Velociraptor\\Velociraptor.exe' -Protocol 'TCP' -RemotePort '443' -RemoteAddress '203.0.113.10'",
+		"-DisplayName 'DFIRMedic-C1: velociraptor-egress-payload' -Direction 'Outbound' -Action Allow -Program '" + filepath.Join(d.WorkDir, "payload", "velociraptor.exe") + "' -Protocol 'TCP' -RemotePort '443' -RemoteAddress '203.0.113.10'",
+		"-DisplayName 'DFIRMedic-C1: orchestrator-probe' -Direction 'Outbound' -Action Allow -Program '" + filepath.Join(d.WorkDir, "dfirmedic.exe") + "' -Protocol 'TCP' -RemotePort '443' -RemoteAddress '203.0.113.10'",
+	} {
+		if !strings.Contains(all, want) {
+			t.Fatalf("missing rule %s in:\n%s", want, all)
+		}
 	}
-	if i := strings.Index(all, "velociraptor-egress"); i < 0 || i > iProf {
-		t.Fatalf("velociraptor egress rule must be added before the default-deny flip:\n%s", all)
+	if strings.Contains(all, "msiexec") || strings.Contains(all, "tailscale") || strings.Contains(all, "-RemotePort '53'") {
+		t.Fatalf("no Tailscale or DNS in the new design:\n%s", all)
+	}
+	if !f.Called("sc.exe", "qc", "Velociraptor") {
+		t.Fatal("install must verify the registered service path (E41 check)")
 	}
 	// workdir populated, service points at workdir copies
 	for _, p := range []string{"manifest.json", "baseline.json", "dfirmedic.exe", "incident.json", "incident.json.sig", filepath.Join("payload", "velociraptor.exe"), filepath.Join("payload", "tools", "thor-lite.exe")} {
@@ -409,5 +458,40 @@ func TestVolatileCaptureFailureIsNonFatal(t *testing.T) {
 	}
 	if b.Volatile["netstat.txt"].Error != "" {
 		t.Fatal("unrelated captures must be unaffected")
+	}
+}
+
+// TestPreflightRefusesClientConfigFromAnotherServer guards E18: the shipped
+// velociraptor.client.yaml's CA must match the fingerprint incident.json was
+// signed with. Swapping the client config (e.g. an attacker repointing the
+// kit at a rogue server, or a build mistake) must fail even though the
+// payload manifest and incident.json signature are both freshly (and
+// correctly) re-done to cover the swap.
+func TestPreflightRefusesClientConfigFromAnotherServer(t *testing.T) {
+	f := happyFake()
+	d := deps(t, f, incJSON)
+	other := strings.Replace(fixtureClientYAML, "AAAA", "BBBB", 1) // different CA DER
+	os.WriteFile(filepath.Join(d.KitDir, "payload", "velociraptor.client.yaml"), []byte(other), 0o644)
+	manifest.Write(filepath.Join(d.KitDir, "payload")) // keep E13/E17 out of the way
+	// re-sign: incident.json's manifest hash changed
+	d = resign(t, d)
+	err := Preflight(context.Background(), d)
+	if err == nil || !strings.HasPrefix(err.Error(), "E18") {
+		t.Fatalf("want E18, got %v", err)
+	}
+}
+
+// TestInstallRefusesUnexpectedServicePath guards E41: if `service install`
+// registers the Velociraptor service from a path other than what
+// incident.json's install_path (and therefore the firewall egress rule)
+// names, the client can start but will be silently blocked by the
+// firewall — staging must fail loudly instead.
+func TestInstallRefusesUnexpectedServicePath(t *testing.T) {
+	f := happyFake()
+	f.Responses[f.Key("sc.exe", "qc", "Velociraptor")] = runner.Result{Stdout: "        BINARY_PATH_NAME   : \"C:\\Elsewhere\\Velociraptor.exe\" service run\r\n"}
+	d := deps(t, f, incJSON)
+	err := Install(context.Background(), d)
+	if err == nil || !strings.HasPrefix(err.Error(), "E41") {
+		t.Fatalf("want E41, got %v", err)
 	}
 }

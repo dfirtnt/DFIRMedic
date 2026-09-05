@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/dfirtnt/DFIRMedic/internal/audit"
@@ -17,7 +18,6 @@ import (
 	"github.com/dfirtnt/DFIRMedic/internal/manifest"
 	"github.com/dfirtnt/DFIRMedic/internal/runner"
 	"github.com/dfirtnt/DFIRMedic/internal/sign"
-	"github.com/dfirtnt/DFIRMedic/internal/tailscale"
 	"github.com/dfirtnt/DFIRMedic/internal/ui"
 	"github.com/dfirtnt/DFIRMedic/internal/velo"
 	"github.com/dfirtnt/DFIRMedic/internal/win"
@@ -40,7 +40,6 @@ type Deps struct {
 	FW        win.Firewall
 	Net       win.Net
 	Sys       win.Sys
-	TS        tailscale.Client
 	Velo      velo.Client
 	Now       func() time.Time
 	Elevated  func() bool
@@ -137,6 +136,21 @@ func Preflight(ctx context.Context, d Deps) error {
 		return code("E13", "payload verification failed", err)
 	}
 	d.Man.Payload = hashes
+	rawCfg, err := os.ReadFile(filepath.Join(d.KitDir, filepath.FromSlash(d.Inc.Velociraptor.ConfigFile)))
+	if err != nil {
+		return code("E18", "read client config", err)
+	}
+	caPEM, err := velo.ExtractCA(rawCfg)
+	if err != nil {
+		return code("E18", "client config", err)
+	}
+	caFP, err := velo.CAFingerprint(caPEM)
+	if err != nil {
+		return code("E18", "client config", err)
+	}
+	if caFP != d.Inc.Server.CASHA256 {
+		return code("E18", "client config CA does not match signed incident.json — kit was assembled from a different server", nil)
+	}
 	up, ads, err := d.Net.AnyPhysicalUp(ctx)
 	if err != nil {
 		return code("E14", "cannot read adapter state", err)
@@ -144,16 +158,7 @@ func Preflight(ctx context.Context, d Deps) error {
 	if up {
 		return code("E14", fmt.Sprintf("network is connected (%s); disconnect before staging", ads[0].Name), nil)
 	}
-	if d.Inc.Firewall.AllowRDPFromResponder {
-		ed, err := d.Sys.EditionID(ctx)
-		if err != nil {
-			return code("E15", "cannot read Windows edition", err)
-		}
-		if win.IsHomeEdition(ed) {
-			return code("E15", "RDP requested but this is a Home edition ("+ed+")", nil)
-		}
-	}
-	for _, svc := range []string{"Tailscale", velo.ServiceName} {
+	for _, svc := range []string{velo.ServiceName} {
 		exists, err := d.Sys.ServiceExists(ctx, svc)
 		if err != nil {
 			return code("E16", "cannot query service "+svc, err)
@@ -230,10 +235,6 @@ func Quarantine(ctx context.Context, d Deps, base *Baseline) error {
 		return err
 	}
 	group := d.Inc.RuleGroup()
-	rdpFrom := ""
-	if d.Inc.Firewall.AllowRDPFromResponder {
-		rdpFrom = d.Inc.Tailscale.ResponderTailnetIP
-	}
 	rollback := func(cause error) error {
 		_ = d.Log.Record("quarantine_rollback", map[string]string{"cause": cause.Error()})
 		importErr := d.FW.Import(ctx, filepath.Join(d.WorkDir, "firewall-original.wfw"))
@@ -258,28 +259,25 @@ func Quarantine(ctx context.Context, d Deps, base *Baseline) error {
 		}
 		return code("E30", "quarantine failed and was rolled back", cause)
 	}
-	for _, r := range win.QuarantineRules(d.Inc.Firewall.DNSResolvers, d.Inc.Firewall.DNSFallbackToDHCP, rdpFrom) {
+	// Windows Firewall matches a program path when a process launches, not at
+	// rule creation, so the not-yet-existing paths below (INSTALL copies the
+	// payload and the orchestrator has already been copied in BASELINE) are fine.
+	rules := append(
+		win.QuarantineRules(d.Inc.Firewall.DNSFallbackToDHCP),
+		win.ServerRules(
+			d.Inc.Velociraptor.InstallPath,
+			filepath.Join(d.WorkDir, "payload", "velociraptor.exe"),
+			filepath.Join(d.WorkDir, "dfirmedic.exe"),
+			d.Inc.Server.IP, d.Inc.Server.Port,
+		)...,
+	)
+	for _, r := range rules {
 		txt, err := d.FW.AddRule(ctx, group, r)
 		if err != nil {
 			return rollback(fmt.Errorf("rule %s: %w", r.Name, err))
 		}
 		d.Man.Rules = append(d.Man.Rules, txt)
 	}
-	// Velociraptor is a separate process from tailscaled, so the tailscaled
-	// allow rule does not cover its outbound connection to the responder.
-	// The path does not exist yet (INSTALL copies it later); Windows Firewall
-	// matches a program path when a process launches, not at rule creation.
-	veloRule := win.Rule{
-		Name:          "velociraptor-egress",
-		Direction:     "Outbound",
-		Program:       filepath.Join(d.WorkDir, "payload", "velociraptor.exe"),
-		RemoteAddress: d.Inc.Tailscale.ResponderTailnetIP,
-	}
-	txt, err := d.FW.AddRule(ctx, group, veloRule)
-	if err != nil {
-		return rollback(fmt.Errorf("rule %s: %w", veloRule.Name, err))
-	}
-	d.Man.Rules = append(d.Man.Rules, txt)
 	// Enabled allow rules match regardless of the profile default, so every
 	// rule that was on the host before us (built-in, third-party, or planted
 	// by the intruder) must be off before the default-deny flip means anything.
@@ -306,20 +304,17 @@ func Install(ctx context.Context, d Deps) error {
 	}
 	_ = d.Log.Record("copy", map[string]string{"from": filepath.Join(d.KitDir, "payload"), "to": filepath.Join(d.WorkDir, "payload")})
 
-	if err := d.TS.InstallMSI(ctx); err != nil {
-		return code("E40", "install Tailscale", err)
-	}
-	if err := d.TS.Up(ctx, d.Inc.Tailscale.AuthKey, d.Inc.Tailscale.Hostname); err != nil {
-		return code("E40", "tailscale up", err)
-	}
 	if err := d.Velo.InstallService(ctx); err != nil {
 		return code("E40", "install Velociraptor", err)
 	}
-	if d.Inc.Firewall.AllowRDPFromResponder {
-		if err := d.Sys.EnableRDP(ctx); err != nil {
-			return code("E40", "enable RDP", err)
-		}
+	got, err := d.Velo.InstalledBinaryPath(ctx)
+	if err != nil {
+		return code("E41", "read Velociraptor service path", err)
 	}
+	if !strings.EqualFold(got, d.Inc.Velociraptor.InstallPath) {
+		return code("E41", fmt.Sprintf("Velociraptor service runs from %q but the firewall allows %q", got, d.Inc.Velociraptor.InstallPath), nil)
+	}
+	_ = d.Log.Record("velociraptor_path_verified", map[string]string{"path": got})
 	exe := filepath.Join(d.WorkDir, "dfirmedic.exe")
 	if err := d.Sys.CreateStartupTask(ctx, TaskNamePrefix+d.Inc.CaseID, exe, "connect --workdir "+d.WorkDir); err != nil {
 		return code("E40", "startup task", err)
