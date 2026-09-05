@@ -2,9 +2,11 @@ package velo
 
 import (
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -44,11 +46,17 @@ func ExtractCA(yaml []byte) ([]byte, error) {
 }
 
 // CAFingerprint is "sha256:<hex>" over the DER bytes of the first
-// CERTIFICATE block, matching incident.json server.ca_sha256.
+// CERTIFICATE block, matching incident.json server.ca_sha256. The DER is
+// parsed, not just hashed: a PEM-shaped block that is not a certificate
+// would otherwise fingerprint cleanly at build time and fail only on the
+// victim host, as a ten-minute E50 with the network already up.
 func CAFingerprint(pemBytes []byte) (string, error) {
 	block, _ := pem.Decode(pemBytes)
 	if block == nil || block.Type != "CERTIFICATE" {
 		return "", errors.New("no CERTIFICATE block in ca_certificate")
+	}
+	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+		return "", fmt.Errorf("ca_certificate is not a valid certificate: %w", err)
 	}
 	sum := sha256.Sum256(block.Bytes)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil

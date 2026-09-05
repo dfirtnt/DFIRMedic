@@ -47,6 +47,19 @@ Copy that file to `payload/velociraptor.client.yaml` on your Mac. `dfirmedic bui
 CA and `install_path` out of it and refuses a client config whose `server_urls` does not
 list your `--server-url`. **If the VPS IP ever changes, every kit built against it is dead.**
 
+`build` also parses the CA as an X.509 certificate — a PEM block that is not really a
+certificate fails here rather than as an E50 on the victim ten minutes in — and requires
+`Client.windows_installer.install_path` to be at least `<drive>:\<dir>\<file>`, so a
+drive-root path such as `C:\Velociraptor.exe` will not build.
+
+Keep that path at least two directories deep; the Velociraptor default
+`$ProgramFiles\Velociraptor\Velociraptor.exe` is what you want. Teardown deletes the
+*parent directory* of `install_path` with `rmdir /s /q`, and it refuses to do that when the
+parent is a drive root or a single top-level directory — `$ProgramFiles\Velociraptor.exe`
+would make that parent all of `C:\Program Files`. Such a kit still stages and runs, but
+teardown logs a refusal for that one step (everything else still reverses) and the
+Velociraptor files have to be removed by hand.
+
 Put the datastore on an encrypted volume; the VPS holds evidence.
 
 ## 2. Tailnet
@@ -142,3 +155,38 @@ From your workstation, over the tunnel: `dfirmedic.exe teardown --workdir C:\Pro
 > outcome afterwards from the host's `audit.jsonl` / `manifest.json`, or
 > on-site — not from the collection output. If the tunnel is already gone,
 > fall back to the local break-glass path (§10.1).
+
+## 9. Error codes you are most likely to be phoned about
+
+The on-site person reads the code off the beacon; you decide what happens next.
+Every code is also in `audit.jsonl` in the working directory, with the underlying error.
+
+**E18 — the shipped client config does not belong to the signed server.** The CA in
+`payload/velociraptor.client.yaml` does not match `server.ca_sha256` in `incident.json`
+(or the file is missing/unreadable). Nothing has been changed on the host: staging stops
+in preflight, and the reboot-resume path (`connect`) stops before it probes. It means the
+kit was assembled wrong — a client config from a different or rebuilt server — not that
+the host is compromised in a new way. Rebuild the kit from the *current* server's
+`config client` output and re-run; do not try to patch the stick in the field.
+
+**E41 — Velociraptor installed itself somewhere the firewall does not allow.** `service
+install` registered the service from a path other than `install_path`, so the client would
+start and then be silently blocked by the default-deny egress rule. This one leaves the
+host **quarantined, with the service installed and no startup task**, so it will not come
+back by itself after a reboot. Recovery is the local break-glass path: read the
+break-glass code to the on-site person and have them run
+
+```
+dfirmedic.exe breakglass --workdir C:\ProgramData\DFIRMedic\<case> --code <code>
+```
+
+which reverses staging (service, install directory, firewall, adapters) and puts the host
+back the way it was. Then fix the kit — the usual cause is an `install_path` in the client
+config that does not match where that Velociraptor build actually installs — and start over.
+
+**E50 / E51 — the server could not be verified, or stopped being verifiable.** The host
+fails closed: Velociraptor is stopped and every adapter is disabled, firewall still locked.
+The beacon and `audit.jsonl` now carry the last probe error, and `probe_failed` records name
+the server and the reason. "certificate not signed by the pinned CA" means something else is
+answering on that IP (captive portal, proxy, wrong host); a dial timeout means the network
+never came up. If you cannot fix it from your side, break-glass as above.

@@ -3,20 +3,56 @@ package velo
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/pem"
 	"strings"
 	"testing"
 )
 
-const sampleClientYAML = `version:
+// testCAPEM and otherCAPEM are real self-signed CA certificates. The
+// fixtures used to carry a fake `AAAA` body, which meant nothing checked
+// that the pinned CA is actually a certificate: a client config with a
+// PEM-shaped but non-certificate ca_certificate built and shipped happily,
+// and only failed on the victim, ten minutes later, as an E50.
+const testCAPEM = `-----BEGIN CERTIFICATE-----
+MIIBazCCARGgAwIBAgIBATAKBggqhkjOPQQDAjAcMRowGAYDVQQDExFERklSTWVk
+aWMgVGVzdCBDQTAgFw0yMDAxMDEwMDAwMDBaGA8yMTAwMDEwMTAwMDAwMFowHDEa
+MBgGA1UEAxMRREZJUk1lZGljIFRlc3QgQ0EwWTATBgcqhkjOPQIBBggqhkjOPQMB
+BwNCAAQ0VadvyKRtY034nyXHgOvhAmYhcyP05/TRHMvnyND4eSspprUn4Bpcnnqo
+3zl3JZj1Rg2eIgU6CWzDlO2KNMxno0IwQDAOBgNVHQ8BAf8EBAMCAoQwDwYDVR0T
+AQH/BAUwAwEB/zAdBgNVHQ4EFgQUEx30H3MgsQ/gsIm4ZW8qV84sadAwCgYIKoZI
+zj0EAwIDSAAwRQIhAPYvQ+VMiWEcdW2P2EByp8HoxtAY5CTQPHfIp79XY8ybAiA4
+bYDmgS7eArLPZlqmoHGKLAvkIdcsXHITekEY+v+4Fw==
+-----END CERTIFICATE-----
+`
+
+const otherCAPEM = `-----BEGIN CERTIFICATE-----
+MIIBdzCCAR2gAwIBAgIBAjAKBggqhkjOPQQDAjAiMSAwHgYDVQQDExdERklSTWVk
+aWMgT3RoZXIgVGVzdCBDQTAgFw0yMDAxMDEwMDAwMDBaGA8yMTAwMDEwMTAwMDAw
+MFowIjEgMB4GA1UEAxMXREZJUk1lZGljIE90aGVyIFRlc3QgQ0EwWTATBgcqhkjO
+PQIBBggqhkjOPQMBBwNCAARtD0RHzUhoBvwO46NFJYoEDMgBbWmC8JGQZyviclUP
+TYRSh92fpNJ4YiRWtaIiqY9ef7nfArCZ8dsdcKP8IEoLo0IwQDAOBgNVHQ8BAf8E
+BAMCAoQwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUSPOXwpLn/uQwnSvEDoJf
+DXCeOIkwCgYIKoZIzj0EAwIDSAAwRQIgDv0dNUEAcv890py9mNOzObDiKtgKAS4g
+vX8c3iYJWtACIQD5xqFx6JX1TxmONHAUHbW+O+rvfFjLL0kpcToPSx65cA==
+-----END CERTIFICATE-----
+`
+
+// indented returns caPEM indented to sit under `ca_certificate: |`.
+func indented(caPEM string) string {
+	var b strings.Builder
+	for _, l := range strings.Split(strings.TrimRight(caPEM, "\n"), "\n") {
+		b.WriteString("    " + l + "\n")
+	}
+	return b.String()
+}
+
+var sampleClientYAML = `version:
   name: velociraptor
 Client:
   server_urls:
   - https://203.0.113.10:443/
   ca_certificate: |
-    -----BEGIN CERTIFICATE-----
-    AAAA
-    -----END CERTIFICATE-----
-  nonce: abc
+` + indented(testCAPEM) + `  nonce: abc
   windows_installer:
     service_name: Velociraptor
     install_path: $ProgramFiles\Velociraptor\Velociraptor.exe
@@ -31,9 +67,8 @@ func TestExtractCAReturnsDedentedPEM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
-	if string(got) != want {
-		t.Fatalf("got %q want %q", got, want)
+	if string(got) != testCAPEM {
+		t.Fatalf("got %q want %q", got, testCAPEM)
 	}
 }
 
@@ -44,17 +79,34 @@ func TestExtractCAMissing(t *testing.T) {
 }
 
 func TestCAFingerprintHashesDER(t *testing.T) {
-	pem := "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
-	got, err := CAFingerprint([]byte(pem))
+	got, err := CAFingerprint([]byte(testCAPEM))
 	if err != nil {
 		t.Fatal(err)
 	}
-	sum := sha256.Sum256([]byte{0, 0, 0}) // base64 "AAAA" decodes to three zero bytes
+	block, _ := pem.Decode([]byte(testCAPEM))
+	sum := sha256.Sum256(block.Bytes)
 	if got != "sha256:"+hex.EncodeToString(sum[:]) {
 		t.Fatalf("got %s", got)
 	}
+	other, err := CAFingerprint([]byte(otherCAPEM))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other == got {
+		t.Fatal("two different CAs must not share a fingerprint")
+	}
 	if _, err := CAFingerprint([]byte("not pem")); err == nil {
 		t.Fatal("expected error for non-PEM input")
+	}
+}
+
+// TestCAFingerprintRejectsNonCertificateDER: a CERTIFICATE-labelled block
+// whose body is not a certificate must fail here, at build time on the
+// responder's Mac, rather than as a ten-minute E50 on the victim host.
+func TestCAFingerprintRejectsNonCertificateDER(t *testing.T) {
+	fake := "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
+	if _, err := CAFingerprint([]byte(fake)); err == nil {
+		t.Fatal("a PEM block that is not a certificate must be rejected")
 	}
 }
 

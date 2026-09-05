@@ -3,6 +3,7 @@ package build
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,12 +15,34 @@ import (
 	"github.com/dfirtnt/DFIRMedic/internal/teardown"
 )
 
+// testCAPEM is a real self-signed CA certificate: the fixture used to carry
+// a fake `AAAA` body, which velo.CAFingerprint now rejects because it parses
+// the DER instead of hashing whatever it finds.
+const testCAPEM = `-----BEGIN CERTIFICATE-----
+MIIBazCCARGgAwIBAgIBATAKBggqhkjOPQQDAjAcMRowGAYDVQQDExFERklSTWVk
+aWMgVGVzdCBDQTAgFw0yMDAxMDEwMDAwMDBaGA8yMTAwMDEwMTAwMDAwMFowHDEa
+MBgGA1UEAxMRREZJUk1lZGljIFRlc3QgQ0EwWTATBgcqhkjOPQIBBggqhkjOPQMB
+BwNCAAQ0VadvyKRtY034nyXHgOvhAmYhcyP05/TRHMvnyND4eSspprUn4Bpcnnqo
+3zl3JZj1Rg2eIgU6CWzDlO2KNMxno0IwQDAOBgNVHQ8BAf8EBAMCAoQwDwYDVR0T
+AQH/BAUwAwEB/zAdBgNVHQ4EFgQUEx30H3MgsQ/gsIm4ZW8qV84sadAwCgYIKoZI
+zj0EAwIDSAAwRQIhAPYvQ+VMiWEcdW2P2EByp8HoxtAY5CTQPHfIp79XY8ybAiA4
+bYDmgS7eArLPZlqmoHGKLAvkIdcsXHITekEY+v+4Fw==
+-----END CERTIFICATE-----
+`
+
 const fixtureClientYAML = `Client:
   server_urls:
   - https://203.0.113.10:443/
   ca_certificate: |
     -----BEGIN CERTIFICATE-----
-    AAAA
+    MIIBazCCARGgAwIBAgIBATAKBggqhkjOPQQDAjAcMRowGAYDVQQDExFERklSTWVk
+    aWMgVGVzdCBDQTAgFw0yMDAxMDEwMDAwMDBaGA8yMTAwMDEwMTAwMDAwMFowHDEa
+    MBgGA1UEAxMRREZJUk1lZGljIFRlc3QgQ0EwWTATBgcqhkjOPQIBBggqhkjOPQMB
+    BwNCAAQ0VadvyKRtY034nyXHgOvhAmYhcyP05/TRHMvnyND4eSspprUn4Bpcnnqo
+    3zl3JZj1Rg2eIgU6CWzDlO2KNMxno0IwQDAOBgNVHQ8BAf8EBAMCAoQwDwYDVR0T
+    AQH/BAUwAwEB/zAdBgNVHQ4EFgQUEx30H3MgsQ/gsIm4ZW8qV84sadAwCgYIKoZI
+    zj0EAwIDSAAwRQIhAPYvQ+VMiWEcdW2P2EByp8HoxtAY5CTQPHfIp79XY8ybAiA4
+    bYDmgS7eArLPZlqmoHGKLAvkIdcsXHITekEY+v+4Fw==
     -----END CERTIFICATE-----
   windows_installer:
     service_name: Velociraptor
@@ -121,7 +144,8 @@ func TestBuildWritesServerBlockFromClientConfig(t *testing.T) {
 	if inc.Schema != 2 || inc.Server.IP != "203.0.113.10" || inc.Server.Port != 443 || inc.Server.URL != o.ServerURL {
 		t.Fatalf("server block: %+v", inc.Server)
 	}
-	sum := sha256.Sum256([]byte{0, 0, 0}) // "AAAA"
+	block, _ := pem.Decode([]byte(testCAPEM))
+	sum := sha256.Sum256(block.Bytes) // the DER of the fixture CA
 	if inc.Server.CASHA256 != "sha256:"+hex.EncodeToString(sum[:]) {
 		t.Fatalf("ca_sha256 = %s", inc.Server.CASHA256)
 	}
@@ -167,7 +191,14 @@ func TestBuildRejectsServerURLThatIsOnlyAPrefixOfTheConfiguredOne(t *testing.T) 
   - https://203.0.113.10:443/old-tunnel-path
   ca_certificate: |
     -----BEGIN CERTIFICATE-----
-    AAAA
+    MIIBazCCARGgAwIBAgIBATAKBggqhkjOPQQDAjAcMRowGAYDVQQDExFERklSTWVk
+    aWMgVGVzdCBDQTAgFw0yMDAxMDEwMDAwMDBaGA8yMTAwMDEwMTAwMDAwMFowHDEa
+    MBgGA1UEAxMRREZJUk1lZGljIFRlc3QgQ0EwWTATBgcqhkjOPQIBBggqhkjOPQMB
+    BwNCAAQ0VadvyKRtY034nyXHgOvhAmYhcyP05/TRHMvnyND4eSspprUn4Bpcnnqo
+    3zl3JZj1Rg2eIgU6CWzDlO2KNMxno0IwQDAOBgNVHQ8BAf8EBAMCAoQwDwYDVR0T
+    AQH/BAUwAwEB/zAdBgNVHQ4EFgQUEx30H3MgsQ/gsIm4ZW8qV84sadAwCgYIKoZI
+    zj0EAwIDSAAwRQIhAPYvQ+VMiWEcdW2P2EByp8HoxtAY5CTQPHfIp79XY8ybAiA4
+    bYDmgS7eArLPZlqmoHGKLAvkIdcsXHITekEY+v+4Fw==
     -----END CERTIFICATE-----
   windows_installer:
     service_name: Velociraptor

@@ -33,17 +33,64 @@ const incJSON = `{"schema":2,"case_id":"C1","created_utc":"2026-09-04T22:00:00Z"
 // well-formed velociraptor.client.yaml with a CA certificate and
 // windows_installer block, exactly what velo.ExtractCA/ExtractInstallPath
 // expect to find in a real client config.
+
+// testCAPEM and otherCAPEM are real self-signed CA certificates: the
+// fixtures used to carry a fake `AAAA` body, which velo.CAFingerprint now
+// rejects because it parses the DER instead of hashing whatever it finds.
+const testCAPEM = `-----BEGIN CERTIFICATE-----
+MIIBazCCARGgAwIBAgIBATAKBggqhkjOPQQDAjAcMRowGAYDVQQDExFERklSTWVk
+aWMgVGVzdCBDQTAgFw0yMDAxMDEwMDAwMDBaGA8yMTAwMDEwMTAwMDAwMFowHDEa
+MBgGA1UEAxMRREZJUk1lZGljIFRlc3QgQ0EwWTATBgcqhkjOPQIBBggqhkjOPQMB
+BwNCAAQ0VadvyKRtY034nyXHgOvhAmYhcyP05/TRHMvnyND4eSspprUn4Bpcnnqo
+3zl3JZj1Rg2eIgU6CWzDlO2KNMxno0IwQDAOBgNVHQ8BAf8EBAMCAoQwDwYDVR0T
+AQH/BAUwAwEB/zAdBgNVHQ4EFgQUEx30H3MgsQ/gsIm4ZW8qV84sadAwCgYIKoZI
+zj0EAwIDSAAwRQIhAPYvQ+VMiWEcdW2P2EByp8HoxtAY5CTQPHfIp79XY8ybAiA4
+bYDmgS7eArLPZlqmoHGKLAvkIdcsXHITekEY+v+4Fw==
+-----END CERTIFICATE-----
+`
+
+const otherCAPEM = `-----BEGIN CERTIFICATE-----
+MIIBdzCCAR2gAwIBAgIBAjAKBggqhkjOPQQDAjAiMSAwHgYDVQQDExdERklSTWVk
+aWMgT3RoZXIgVGVzdCBDQTAgFw0yMDAxMDEwMDAwMDBaGA8yMTAwMDEwMTAwMDAw
+MFowIjEgMB4GA1UEAxMXREZJUk1lZGljIE90aGVyIFRlc3QgQ0EwWTATBgcqhkjO
+PQIBBggqhkjOPQMBBwNCAARtD0RHzUhoBvwO46NFJYoEDMgBbWmC8JGQZyviclUP
+TYRSh92fpNJ4YiRWtaIiqY9ef7nfArCZ8dsdcKP8IEoLo0IwQDAOBgNVHQ8BAf8E
+BAMCAoQwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUSPOXwpLn/uQwnSvEDoJf
+DXCeOIkwCgYIKoZIzj0EAwIDSAAwRQIgDv0dNUEAcv890py9mNOzObDiKtgKAS4g
+vX8c3iYJWtACIQD5xqFx6JX1TxmONHAUHbW+O+rvfFjLL0kpcToPSx65cA==
+-----END CERTIFICATE-----
+`
+
 const fixtureClientYAML = `Client:
   server_urls:
   - https://203.0.113.10:443/
   ca_certificate: |
     -----BEGIN CERTIFICATE-----
-    AAAA
+    MIIBazCCARGgAwIBAgIBATAKBggqhkjOPQQDAjAcMRowGAYDVQQDExFERklSTWVk
+    aWMgVGVzdCBDQTAgFw0yMDAxMDEwMDAwMDBaGA8yMTAwMDEwMTAwMDAwMFowHDEa
+    MBgGA1UEAxMRREZJUk1lZGljIFRlc3QgQ0EwWTATBgcqhkjOPQIBBggqhkjOPQMB
+    BwNCAAQ0VadvyKRtY034nyXHgOvhAmYhcyP05/TRHMvnyND4eSspprUn4Bpcnnqo
+    3zl3JZj1Rg2eIgU6CWzDlO2KNMxno0IwQDAOBgNVHQ8BAf8EBAMCAoQwDwYDVR0T
+    AQH/BAUwAwEB/zAdBgNVHQ4EFgQUEx30H3MgsQ/gsIm4ZW8qV84sadAwCgYIKoZI
+    zj0EAwIDSAAwRQIhAPYvQ+VMiWEcdW2P2EByp8HoxtAY5CTQPHfIp79XY8ybAiA4
+    bYDmgS7eArLPZlqmoHGKLAvkIdcsXHITekEY+v+4Fw==
     -----END CERTIFICATE-----
   windows_installer:
     service_name: Velociraptor
     install_path: $ProgramFiles\Velociraptor\Velociraptor.exe
 `
+
+// otherClientYAML is the same config carrying a different (also real) CA.
+var otherClientYAML = strings.Replace(fixtureClientYAML, indentPEM(testCAPEM), indentPEM(otherCAPEM), 1)
+
+// indentPEM lines a PEM block up under `ca_certificate: |`.
+func indentPEM(p string) string {
+	var b strings.Builder
+	for _, l := range strings.Split(strings.TrimRight(p, "\n"), "\n") {
+		b.WriteString("    " + l + "\n")
+	}
+	return b.String()
+}
 
 // disableScript is the prefix of the DisableOtherRules sweep for case C1.
 const disableScript = "$r = @(Get-NetFirewallRule -Enabled True | Where-Object { $_.Group -ne 'DFIRMedic-C1'"
@@ -470,8 +517,7 @@ func TestVolatileCaptureFailureIsNonFatal(t *testing.T) {
 func TestPreflightRefusesClientConfigFromAnotherServer(t *testing.T) {
 	f := happyFake()
 	d := deps(t, f, incJSON)
-	other := strings.Replace(fixtureClientYAML, "AAAA", "BBBB", 1) // different CA DER
-	os.WriteFile(filepath.Join(d.KitDir, "payload", "velociraptor.client.yaml"), []byte(other), 0o644)
+	os.WriteFile(filepath.Join(d.KitDir, "payload", "velociraptor.client.yaml"), []byte(otherClientYAML), 0o644)
 	manifest.Write(filepath.Join(d.KitDir, "payload")) // keep E13/E17 out of the way
 	// re-sign: incident.json's manifest hash changed
 	d = resign(t, d)
