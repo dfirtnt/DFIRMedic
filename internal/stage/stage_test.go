@@ -25,7 +25,8 @@ const incJSON = `{"schema":1,"case_id":"C1","created_utc":"2026-09-04T22:00:00Z"
 "velociraptor":{"server_url":"https://100.64.0.1:8000/","config_file":"payload/velociraptor.client.yaml"},
 "firewall":{"dns_resolvers":["1.1.1.1"],"allow_rdp_from_responder":false,"dns_fallback_to_dhcp":false},
 "watchdog":{"tunnel_timeout_sec":600,"heartbeat_grace_sec":300},
-"contact":{"phone":"+1555","name":"Alex"},"breakglass_code_hash":"sha256:x"}`
+"contact":{"phone":"+1555","name":"Alex"},"breakglass_code_hash":"sha256:x",
+"payload_manifest_sha256":"__MANIFEST_HASH_PLACEHOLDER__"}`
 
 func psKey(f *runner.Fake, script string) string {
 	return f.Key("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
@@ -57,6 +58,11 @@ func deps(t *testing.T, f *runner.Fake, incText string) Deps {
 	if _, err := manifest.Write(filepath.Join(kit, "payload")); err != nil {
 		t.Fatal(err)
 	}
+	manifestHash, err := manifest.HashFile(filepath.Join(kit, "payload", manifest.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	incText = strings.Replace(incText, "__MANIFEST_HASH_PLACEHOLDER__", "sha256:"+manifestHash, 1)
 	pub, priv, _ := sign.GenerateKeypair()
 	os.WriteFile(filepath.Join(kit, "incident.json"), []byte(incText), 0o600)
 	inc, raw, err := config.Load(filepath.Join(kit, "incident.json"))
@@ -101,6 +107,14 @@ func TestPreflightRefusesTamperedPayload(t *testing.T) {
 	os.WriteFile(filepath.Join(d.KitDir, "payload", "velociraptor.exe"), []byte("evil"), 0o755)
 	if err := Preflight(context.Background(), d); err == nil || !strings.Contains(err.Error(), "E13") {
 		t.Fatalf("want E13, got %v", err)
+	}
+}
+
+func TestPreflightRefusesTamperedManifestHash(t *testing.T) {
+	d := deps(t, happyFake(), incJSON)
+	d.Inc.PayloadManifestSHA256 = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	if err := Preflight(context.Background(), d); err == nil || !strings.Contains(err.Error(), "E17") {
+		t.Fatalf("want E17, got %v", err)
 	}
 }
 

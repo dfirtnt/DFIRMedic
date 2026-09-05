@@ -17,7 +17,8 @@ const sample = `{
   "firewall": {"dns_resolvers":["1.1.1.1","9.9.9.9"],"allow_rdp_from_responder":false,"dns_fallback_to_dhcp":false},
   "watchdog": {"tunnel_timeout_sec":600,"heartbeat_grace_sec":300},
   "contact": {"phone":"+15555550100","name":"Responder"},
-  "breakglass_code_hash": "sha256:0000"
+  "breakglass_code_hash": "sha256:0000",
+  "payload_manifest_sha256": "sha256:placeholder"
 }`
 
 func write(t *testing.T, s string) string {
@@ -68,6 +69,14 @@ func TestValidateRejectsMissingFields(t *testing.T) {
 	inc.Watchdog.TunnelTimeoutSec = 0
 	if err := inc.Validate(inc.CreatedUTC); err == nil {
 		t.Fatal("expected watchdog error")
+	}
+}
+
+func TestValidateRejectsMissingPayloadManifestHash(t *testing.T) {
+	inc, _, _ := Load(write(t, sample))
+	inc.PayloadManifestSHA256 = ""
+	if err := inc.Validate(inc.CreatedUTC); err == nil {
+		t.Fatal("expected payload_manifest_sha256 required error")
 	}
 }
 

@@ -11,16 +11,17 @@ import (
 )
 
 type Incident struct {
-	Schema             int       `json:"schema"`
-	CaseID             string    `json:"case_id"`
-	CreatedUTC         time.Time `json:"created_utc"`
-	ExpiresUTC         time.Time `json:"expires_utc"`
-	Tailscale          Tailscale `json:"tailscale"`
-	Velociraptor       Velo      `json:"velociraptor"`
-	Firewall           Firewall  `json:"firewall"`
-	Watchdog           Watchdog  `json:"watchdog"`
-	Contact            Contact   `json:"contact"`
-	BreakglassCodeHash string    `json:"breakglass_code_hash"`
+	Schema                int       `json:"schema"`
+	CaseID                string    `json:"case_id"`
+	CreatedUTC            time.Time `json:"created_utc"`
+	ExpiresUTC            time.Time `json:"expires_utc"`
+	Tailscale             Tailscale `json:"tailscale"`
+	Velociraptor          Velo      `json:"velociraptor"`
+	Firewall              Firewall  `json:"firewall"`
+	Watchdog              Watchdog  `json:"watchdog"`
+	Contact               Contact   `json:"contact"`
+	BreakglassCodeHash    string    `json:"breakglass_code_hash"`
+	PayloadManifestSHA256 string    `json:"payload_manifest_sha256"`
 }
 
 type Tailscale struct {
@@ -104,6 +105,9 @@ func (i *Incident) Validate(now time.Time) error {
 	}
 	if i.BreakglassCodeHash == "" {
 		errs = append(errs, errors.New("breakglass_code_hash required"))
+	}
+	if i.PayloadManifestSHA256 == "" {
+		errs = append(errs, errors.New("payload_manifest_sha256 required"))
 	}
 	return errors.Join(errs...)
 }

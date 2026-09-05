@@ -122,6 +122,13 @@ func Preflight(ctx context.Context, d Deps) error {
 	if err := d.Inc.Validate(d.Now()); err != nil {
 		return code("E12", "incident.json invalid", err)
 	}
+	manifestHash, err := manifest.HashFile(filepath.Join(d.KitDir, "payload", manifest.FileName))
+	if err != nil {
+		return code("E17", "cannot hash payload manifest", err)
+	}
+	if "sha256:"+manifestHash != d.Inc.PayloadManifestSHA256 {
+		return code("E17", "payload manifest hash does not match signed incident.json — kit may have been tampered with", nil)
+	}
 	hashes, err := manifest.Verify(filepath.Join(d.KitDir, "payload"))
 	if err != nil {
 		return code("E13", "payload verification failed", err)
