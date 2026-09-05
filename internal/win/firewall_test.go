@@ -315,3 +315,26 @@ func TestEnableRulesQuotesEachName(t *testing.T) {
 		t.Fatal("no names must be a no-op")
 	}
 }
+
+// New-NetFirewallRule -RemoteAddress takes a string array. A single quoted
+// string containing a comma is rejected by Windows as "The address is
+// invalid" (seen on a real host, 2026-09-05), so multiple resolvers must be
+// emitted as separate PowerShell string literals.
+func TestAddRuleEmitsMultipleRemoteAddressesAsArray(t *testing.T) {
+	f := runner.NewFake()
+	fw := Firewall{R: f}
+	txt, err := fw.AddRule(context.Background(), "G", Rule{Name: "dns-udp", Direction: "Outbound", RemoteAddress: "1.1.1.1,9.9.9.9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(txt, "-RemoteAddress '1.1.1.1','9.9.9.9' ") {
+		t.Fatalf("multi-address must be a PowerShell array of quoted strings, got: %s", txt)
+	}
+	if strings.Contains(txt, "'1.1.1.1,9.9.9.9'") {
+		t.Fatalf("comma-joined single string is rejected by Windows: %s", txt)
+	}
+	txt, _ = fw.AddRule(context.Background(), "G", Rule{Name: "one", Direction: "Outbound", RemoteAddress: "100.64.0.1"})
+	if !strings.Contains(txt, "-RemoteAddress '100.64.0.1' ") {
+		t.Fatalf("single address must stay a single literal: %s", txt)
+	}
+}

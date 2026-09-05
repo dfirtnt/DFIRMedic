@@ -66,7 +66,7 @@ func (b *Beacon) Render() string {
 	case Ready:
 		word, colour, instruction = "READY", ansiGreen, "RECONNECT NETWORK NOW"
 	case Connected:
-		word, colour, instruction = "CONNECTED", ansiGreen, "You may leave. Do not turn the computer off."
+		word, colour, instruction = "CONNECTED", ansiGreen, "You may leave. Leave this window open and the computer on."
 	case Error:
 		word, colour, instruction = "ERROR", ansiRed, fmt.Sprintf("CALL %s %s", b.contact.Name, b.contact.Phone)
 	}

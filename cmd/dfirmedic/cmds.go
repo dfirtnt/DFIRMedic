@@ -212,7 +212,9 @@ func openHost(dir, workDir string, dryRun bool) (*host, error) {
 	}, nil
 }
 
-func hold() {
+// hold keeps the console open so the operator can read what went wrong; a
+// variable so tests can stub the blocking wait.
+var hold = func() {
 	fmt.Fprintln(os.Stderr, "\nPress Ctrl-C to close this window.")
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
@@ -230,11 +232,13 @@ func cmdStage(args []string) int {
 	o, err := parseStage(args, exe)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		hold()
 		return 2
 	}
 	h, err := openHost(o.Kit, o.WorkDir, o.DryRun)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		hold()
 		return 1
 	}
 	workDir := o.WorkDir

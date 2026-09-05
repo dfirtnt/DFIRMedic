@@ -80,3 +80,38 @@ func TestParseBuildRequiresCore(t *testing.T) {
 		t.Fatalf("%+v", o)
 	}
 }
+
+// A double-click launches the exe with no arguments. The field card tells the
+// on-site person to do exactly that, so a bare launch must mean `stage`.
+func TestResolveCommandDefaultsToStageOnBareLaunch(t *testing.T) {
+	name, rest := resolveCommand([]string{`E:\dfirmedic.exe`})
+	if name != "stage" || len(rest) != 0 {
+		t.Fatalf("bare launch → %q %v, want stage []", name, rest)
+	}
+	name, rest = resolveCommand([]string{"dfirmedic", "verify", "--kit", "x"})
+	if name != "verify" || len(rest) != 2 || rest[1] != "x" {
+		t.Fatalf("explicit command → %q %v", name, rest)
+	}
+}
+
+// Early failures in stage (bad flags, kit not found) used to print to stderr
+// and return, which closes the console before the operator can read it.
+func TestStageHoldsWindowOnEarlyFailure(t *testing.T) {
+	held := 0
+	orig := hold
+	hold = func() { held++ }
+	defer func() { hold = orig }()
+	if rc := cmdStage([]string{"--kit", filepath.Join(t.TempDir(), "missing")}); rc == 0 {
+		t.Fatal("expected failure for a missing kit")
+	}
+	if held != 1 {
+		t.Fatalf("hold called %d times, want 1", held)
+	}
+	held = 0
+	if rc := cmdStage([]string{"--no-such-flag"}); rc == 0 {
+		t.Fatal("expected failure for a bad flag")
+	}
+	if held != 1 {
+		t.Fatalf("hold called %d times on bad flag, want 1", held)
+	}
+}

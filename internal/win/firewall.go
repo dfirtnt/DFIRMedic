@@ -33,6 +33,17 @@ type ProfileState struct {
 
 func psq(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
+// psqList quotes a comma-separated value as a PowerShell string array
+// ('a','b'). New-NetFirewallRule's -RemoteAddress is string[]; a single
+// literal containing a comma is rejected as an invalid address.
+func psqList(s string) string {
+	parts := strings.Split(s, ",")
+	for i, p := range parts {
+		parts[i] = psq(strings.TrimSpace(p))
+	}
+	return strings.Join(parts, ",")
+}
+
 func (f Firewall) Export(ctx context.Context, path string) error {
 	_, err := f.R.Run(ctx, "netsh.exe", "advfirewall", "export", path)
 	return err
@@ -150,7 +161,7 @@ func (f Firewall) AddRule(ctx context.Context, group string, r Rule) (string, er
 		fmt.Fprintf(&b, " -LocalPort %s", psq(r.LocalPort))
 	}
 	if r.RemoteAddress != "" {
-		fmt.Fprintf(&b, " -RemoteAddress %s", psq(r.RemoteAddress))
+		fmt.Fprintf(&b, " -RemoteAddress %s", psqList(r.RemoteAddress))
 	}
 	b.WriteString(" | Out-Null")
 	txt := b.String()
