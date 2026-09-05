@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -207,8 +208,16 @@ func Quarantine(ctx context.Context, d Deps, base *Baseline) error {
 	}
 	rollback := func(cause error) error {
 		_ = d.Log.Record("quarantine_rollback", map[string]string{"cause": cause.Error()})
-		_ = d.FW.RemoveGroup(ctx, group)
-		_ = d.FW.RestoreProfiles(ctx, base.Profiles)
+		removeErr := d.FW.RemoveGroup(ctx, group)
+		restoreErr := d.FW.RestoreProfiles(ctx, base.Profiles)
+		rollbackErr := errors.Join(removeErr, restoreErr)
+		_ = d.Log.Record("quarantine_rollback_result", map[string]string{
+			"ok":    fmt.Sprintf("%v", rollbackErr == nil),
+			"error": fmt.Sprintf("%v", rollbackErr),
+		})
+		if rollbackErr != nil {
+			return code("E30", "quarantine failed AND rollback failed — host may still be locked down, run breakglass", errors.Join(cause, rollbackErr))
+		}
 		return code("E30", "quarantine failed and was rolled back", cause)
 	}
 	for _, r := range win.QuarantineRules(d.Inc.Firewall.DNSResolvers, d.Inc.Firewall.DNSFallbackToDHCP, rdpFrom) {

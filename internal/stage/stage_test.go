@@ -2,6 +2,7 @@ package stage
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,6 +146,22 @@ func TestQuarantineRollsBackOnFailure(t *testing.T) {
 	}
 	if !f.Called("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "Set-NetFirewallProfile -Profile 'Domain' -Enabled 'True' -DefaultInboundAction 'Block' -DefaultOutboundAction 'Allow'") {
 		t.Fatal("profiles must be restored from baseline on rollback")
+	}
+}
+
+func TestQuarantineReportsFailedRollback(t *testing.T) {
+	f := happyFake()
+	f.Responses[psKey(f, "New-NetFirewallRule -Group 'DFIRMedic-C1' -DisplayName 'DFIRMedic-C1: dns-tcp'")] = runner.Result{ExitCode: 1, Stderr: "nope"}
+	f.Errors[psKey(f, "Remove-NetFirewallRule -Group 'DFIRMedic-C1' -ErrorAction SilentlyContinue")] = errors.New("access denied")
+	f.Errors[psKey(f, "Set-NetFirewallProfile -Profile 'Domain' -Enabled 'True' -DefaultInboundAction 'Block' -DefaultOutboundAction 'Allow'")] = errors.New("access denied")
+	d := deps(t, f, incJSON)
+	base, err := TakeBaseline(context.Background(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = Quarantine(context.Background(), d, base)
+	if err == nil || !strings.Contains(err.Error(), "rollback failed") {
+		t.Fatalf("want rollback-failed error, got %v", err)
 	}
 }
 
