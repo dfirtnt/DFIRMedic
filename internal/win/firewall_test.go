@@ -55,7 +55,7 @@ func TestAddRuleBuildsCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"New-NetFirewallRule", "-Group 'DFIRMedic-C1'", "-Direction Outbound", "-Action Allow", `-Program 'C:\Program Files\Tailscale\tailscaled.exe'`} {
+	for _, want := range []string{"New-NetFirewallRule", "-Group 'DFIRMedic-C1'", "-Direction 'Outbound'", "-Action Allow", `-Program 'C:\Program Files\Tailscale\tailscaled.exe'`} {
 		if !strings.Contains(txt, want) {
 			t.Fatalf("missing %q in %s", want, txt)
 		}
@@ -92,7 +92,7 @@ func TestSetAllProfilesAndRemoveGroup(t *testing.T) {
 	for _, c := range f.Calls {
 		all += strings.Join(c, " ") + "\n"
 	}
-	for _, want := range []string{"Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled True -DefaultInboundAction Block -DefaultOutboundAction Block", "Remove-NetFirewallRule -Group 'DFIRMedic-C1'"} {
+	for _, want := range []string{"Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled 'True' -DefaultInboundAction 'Block' -DefaultOutboundAction 'Block'", "Remove-NetFirewallRule -Group 'DFIRMedic-C1'"} {
 		if !strings.Contains(all, want) {
 			t.Fatalf("missing %q in:\n%s", want, all)
 		}
@@ -106,5 +106,27 @@ func TestExportImportUseNetsh(t *testing.T) {
 	fw.Import(context.Background(), `C:\w\fw.wfw`)
 	if !f.Called("netsh.exe", "advfirewall", "export", `C:\w\fw.wfw`) || !f.Called("netsh.exe", "advfirewall", "import", `C:\w\fw.wfw`) {
 		t.Fatalf("%v", f.Calls)
+	}
+}
+
+func TestAddRuleQuotesRemoteAddress(t *testing.T) {
+	f := runner.NewFake()
+	fw := Firewall{R: f}
+	txt, err := fw.AddRule(context.Background(), "G", Rule{
+		Name: "x", Direction: "Outbound", RemoteAddress: "100.64.0.1'; Start-Process notepad.exe; '",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The malicious value must be neutralized inside a quoted literal
+	if strings.Contains(txt, "Start-Process") && !strings.Contains(txt, "Start-Process notepad.exe; '") {
+		// Check that the single quotes are properly escaped (doubled)
+		if !strings.Contains(txt, "'100.64.0.1''; Start-Process notepad.exe; '''") {
+			t.Fatalf("malicious value must be neutralized via quote escaping, got: %s", txt)
+		}
+	}
+	// Verify the -RemoteAddress parameter has proper quoting
+	if !strings.Contains(txt, "-RemoteAddress '100.64.0.1''; Start-Process notepad.exe; '''") {
+		t.Fatalf("expected properly doubled-quote escaping in -RemoteAddress, got: %s", txt)
 	}
 }

@@ -86,7 +86,7 @@ func (f Firewall) SetAllProfiles(ctx context.Context, enabled bool, inbound, out
 	if enabled {
 		en = "True"
 	}
-	_, err := runner.PS(ctx, f.R, fmt.Sprintf("Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled %s -DefaultInboundAction %s -DefaultOutboundAction %s", en, inbound, outbound))
+	_, err := runner.PS(ctx, f.R, fmt.Sprintf("Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled %s -DefaultInboundAction %s -DefaultOutboundAction %s", psq(en), psq(inbound), psq(outbound)))
 	return err
 }
 
@@ -96,7 +96,7 @@ func (f Firewall) RestoreProfiles(ctx context.Context, states []ProfileState) er
 		if s.Enabled {
 			en = "True"
 		}
-		if _, err := runner.PS(ctx, f.R, fmt.Sprintf("Set-NetFirewallProfile -Profile %s -Enabled %s -DefaultInboundAction %s -DefaultOutboundAction %s", s.Name, en, s.DefaultInboundAction, s.DefaultOutboundAction)); err != nil {
+		if _, err := runner.PS(ctx, f.R, fmt.Sprintf("Set-NetFirewallProfile -Profile %s -Enabled %s -DefaultInboundAction %s -DefaultOutboundAction %s", psq(s.Name), psq(en), psq(s.DefaultInboundAction), psq(s.DefaultOutboundAction))); err != nil {
 			return err
 		}
 	}
@@ -115,21 +115,21 @@ type Rule struct {
 
 func (f Firewall) AddRule(ctx context.Context, group string, r Rule) (string, error) {
 	var b strings.Builder
-	fmt.Fprintf(&b, "New-NetFirewallRule -Group %s -DisplayName %s -Direction %s -Action Allow", psq(group), psq(group+": "+r.Name), r.Direction)
+	fmt.Fprintf(&b, "New-NetFirewallRule -Group %s -DisplayName %s -Direction %s -Action Allow", psq(group), psq(group+": "+r.Name), psq(r.Direction))
 	if r.Program != "" {
 		fmt.Fprintf(&b, " -Program %s", psq(r.Program))
 	}
 	if r.Protocol != "" {
-		fmt.Fprintf(&b, " -Protocol %s", r.Protocol)
+		fmt.Fprintf(&b, " -Protocol %s", psq(r.Protocol))
 	}
 	if r.RemotePort != "" {
-		fmt.Fprintf(&b, " -RemotePort %s", r.RemotePort)
+		fmt.Fprintf(&b, " -RemotePort %s", psq(r.RemotePort))
 	}
 	if r.LocalPort != "" {
-		fmt.Fprintf(&b, " -LocalPort %s", r.LocalPort)
+		fmt.Fprintf(&b, " -LocalPort %s", psq(r.LocalPort))
 	}
 	if r.RemoteAddress != "" {
-		fmt.Fprintf(&b, " -RemoteAddress %s", r.RemoteAddress)
+		fmt.Fprintf(&b, " -RemoteAddress %s", psq(r.RemoteAddress))
 	}
 	b.WriteString(" | Out-Null")
 	txt := b.String()
@@ -154,6 +154,9 @@ func QuarantineRules(dnsResolvers []string, dnsFallbackDHCP bool, rdpFrom string
 			Rule{Name: "dns-tcp", Direction: "Outbound", Protocol: "TCP", RemotePort: "53", RemoteAddress: addrs},
 		)
 	}
+	// No RemoteAddress restriction here: the DHCP-assigned resolver's address
+	// isn't known ahead of time. This is an accepted, deliberate exposure —
+	// egress to port 53 on any host — not an oversight. See spec 8.3.
 	if dnsFallbackDHCP {
 		rules = append(rules,
 			Rule{Name: "dns-dhcp-udp", Direction: "Outbound", Protocol: "UDP", RemotePort: "53"},
