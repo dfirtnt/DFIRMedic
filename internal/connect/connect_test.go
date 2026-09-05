@@ -10,20 +10,39 @@ import (
 
 	"github.com/dfirtnt/DFIRMedic/internal/audit"
 	"github.com/dfirtnt/DFIRMedic/internal/config"
+	"github.com/dfirtnt/DFIRMedic/internal/probe"
 	"github.com/dfirtnt/DFIRMedic/internal/runner"
-	"github.com/dfirtnt/DFIRMedic/internal/tailscale"
 	"github.com/dfirtnt/DFIRMedic/internal/ui"
 	"github.com/dfirtnt/DFIRMedic/internal/velo"
 	"github.com/dfirtnt/DFIRMedic/internal/win"
 )
 
 const (
-	stNeedsLogin = `{"BackendState":"NeedsLogin","Peer":{}}`
-	stRespOnline = `{"BackendState":"Running","Peer":{"nodekey:resp":{"PublicKey":"nodekey:resp","Online":true}}}`
-	stRespOff    = `{"BackendState":"Running","Peer":{"nodekey:resp":{"PublicKey":"nodekey:resp","Online":false}}}`
-	adUp         = `[{"Name":"Wi-Fi","Status":"Up"}]`
-	adDown       = `[{"Name":"Wi-Fi","Status":"Disconnected"}]`
+	adUp   = `[{"Name":"Wi-Fi","Status":"Up"}]`
+	adDown = `[{"Name":"Wi-Fi","Status":"Disconnected"}]`
 )
+
+// fakeProbe returns scripted results in order, repeating the last one.
+type fakeProbe struct {
+	errs []error
+	i    int
+	n    int
+}
+
+func (p *fakeProbe) Verify(context.Context) (string, error) {
+	p.n++
+	i := p.i
+	if i >= len(p.errs) {
+		i = len(p.errs) - 1
+	}
+	p.i++
+	if err := p.errs[i]; err != nil {
+		return "", err
+	}
+	return "leaf0", nil
+}
+
+var errDown = errors.New("probe: dial tcp: i/o timeout")
 
 // seq is a Runner that returns scripted responses in order for matching
 // argv prefixes (repeating the last one), and delegates everything else to a Fake.
@@ -77,20 +96,20 @@ func (c *clock) sleep(ctx context.Context, _ time.Duration) error {
 	return ctx.Err()
 }
 
-func deps(t *testing.T, r runner.Runner, c *clock) Deps {
+func deps(t *testing.T, r runner.Runner, c *clock, pr probe.Prober) Deps {
 	t.Helper()
 	work := t.TempDir()
 	log, _ := audit.Open(filepath.Join(work, "audit.jsonl"), nil)
 	inc := &config.Incident{
-		CaseID:    "C1",
-		Tailscale: config.Tailscale{ResponderNodeKey: "nodekey:resp"},
-		Watchdog:  config.Watchdog{TunnelTimeoutSec: 600, HeartbeatGraceSec: 300},
-		Contact:   config.Contact{Name: "Alex", Phone: "+1555"},
+		CaseID:   "C1",
+		Server:   config.Server{IP: "203.0.113.10", Port: 443},
+		Watchdog: config.Watchdog{TunnelTimeoutSec: 600, HeartbeatGraceSec: 300},
+		Contact:  config.Contact{Name: "Alex", Phone: "+1555"},
 	}
 	return Deps{
 		Inc: inc, WorkDir: work, R: r, Log: log, Man: &audit.Manifest{Phases: map[string]time.Time{}},
 		Beacon: ui.New(&strings.Builder{}, inc.Contact),
-		Net: win.Net{R: r}, TS: tailscale.Client{R: r}, Velo: velo.Client{R: r},
+		Net:    win.Net{R: r}, Probe: pr, Velo: velo.Client{R: r},
 		Now: c.now, Sleep: c.sleep, Poll: 2 * time.Second,
 	}
 }
@@ -102,10 +121,10 @@ func psPrefix(script string) string {
 func TestRunConnectsThenStartsVelociraptorThenHeartbeats(t *testing.T) {
 	s := newSeq()
 	s.script(psPrefix("Get-NetAdapter"), adDown, adDown, adUp)
-	s.script(tailscale.ExePath+" status --json", stNeedsLogin, stRespOnline)
+	pr := &fakeProbe{errs: []error{errDown, errDown, nil}}
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &clock{t: time.Unix(1000, 0), step: 2 * time.Second, cancel: cancel, after: 12}
-	d := deps(t, s, c)
+	d := deps(t, s, c, pr)
 	err := Run(ctx, d)
 	if err != nil {
 		t.Fatalf("normal cancel must return nil, got %v", err)
@@ -124,14 +143,17 @@ func TestRunConnectsThenStartsVelociraptorThenHeartbeats(t *testing.T) {
 	if s.f.Called("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "Disable-NetAdapter") {
 		t.Fatal("must not disable adapters on a clean run")
 	}
+	if pr.n < 4 {
+		t.Fatalf("heartbeat should keep probing after CONNECTED, got %d calls", pr.n)
+	}
 }
 
 func TestTunnelTimeoutFailsClosed(t *testing.T) {
 	s := newSeq()
 	s.script(psPrefix("Get-NetAdapter"), adUp)
-	s.script(tailscale.ExePath+" status --json", stNeedsLogin)
+	pr := &fakeProbe{errs: []error{errDown}}
 	c := &clock{t: time.Unix(1000, 0), step: 30 * time.Second}
-	d := deps(t, s, c)
+	d := deps(t, s, c, pr)
 	err := Run(context.Background(), d)
 	if err == nil || !strings.Contains(err.Error(), "E50") {
 		t.Fatalf("want E50, got %v", err)
@@ -140,7 +162,7 @@ func TestTunnelTimeoutFailsClosed(t *testing.T) {
 		t.Fatal("adapters must be disabled on timeout")
 	}
 	if s.f.Called("sc.exe", "start", "Velociraptor") {
-		t.Fatal("Velociraptor must never start without a verified tunnel")
+		t.Fatal("Velociraptor must never start without a verified server")
 	}
 	if d.Beacon.State() != ui.Error || !strings.Contains(d.Beacon.Render(), "E50") {
 		t.Fatal("beacon must show E50")
@@ -150,9 +172,9 @@ func TestTunnelTimeoutFailsClosed(t *testing.T) {
 func TestHeartbeatLossFailsClosed(t *testing.T) {
 	s := newSeq()
 	s.script(psPrefix("Get-NetAdapter"), adUp)
-	s.script(tailscale.ExePath+" status --json", stRespOnline, stRespOnline, stRespOff)
+	pr := &fakeProbe{errs: []error{nil, errDown}}
 	c := &clock{t: time.Unix(1000, 0), step: 100 * time.Second}
-	d := deps(t, s, c)
+	d := deps(t, s, c, pr)
 	err := Run(context.Background(), d)
 	if err == nil || !strings.Contains(err.Error(), "E51") {
 		t.Fatalf("want E51, got %v", err)
@@ -168,10 +190,10 @@ func TestHeartbeatLossFailsClosed(t *testing.T) {
 func TestHeartbeatToleratesBriefBlip(t *testing.T) {
 	s := newSeq()
 	s.script(psPrefix("Get-NetAdapter"), adUp)
-	s.script(tailscale.ExePath+" status --json", stRespOnline, stRespOff, stRespOff, stRespOnline)
+	pr := &fakeProbe{errs: []error{nil, errDown, nil}}
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &clock{t: time.Unix(1000, 0), step: 50 * time.Second, cancel: cancel, after: 8}
-	d := deps(t, s, c)
+	d := deps(t, s, c, pr)
 	if err := Run(ctx, d); err != nil {
 		t.Fatalf("a blip shorter than the grace period must not fail closed: %v", err)
 	}
@@ -180,10 +202,10 @@ func TestHeartbeatToleratesBriefBlip(t *testing.T) {
 func TestVelociraptorStartFailure(t *testing.T) {
 	s := newSeq()
 	s.script(psPrefix("Get-NetAdapter"), adUp)
-	s.script(tailscale.ExePath+" status --json", stRespOnline)
+	pr := &fakeProbe{errs: []error{nil}}
 	s.f.Responses[s.f.Key("sc.exe", "start", "Velociraptor")] = runner.Result{ExitCode: 1053, Stderr: "did not respond"}
 	c := &clock{t: time.Unix(1000, 0), step: time.Second}
-	err := Run(context.Background(), deps(t, s, c))
+	err := Run(context.Background(), deps(t, s, c, pr))
 	if err == nil || !strings.Contains(err.Error(), "E52") {
 		t.Fatalf("want E52, got %v", err)
 	}
@@ -196,9 +218,9 @@ func TestVelociraptorStartFailure(t *testing.T) {
 func TestHeartbeatSleepErrorFailsClosed(t *testing.T) {
 	s := newSeq()
 	s.script(psPrefix("Get-NetAdapter"), adUp)
-	s.script(tailscale.ExePath+" status --json", stRespOnline)
+	pr := &fakeProbe{errs: []error{nil}}
 	c := &clock{t: time.Unix(1000, 0), step: time.Second}
-	d := deps(t, s, c)
+	d := deps(t, s, c, pr)
 	sleepErr := errors.New("deadline exceeded")
 	d.Sleep = func(context.Context, time.Duration) error { return sleepErr }
 
@@ -230,11 +252,11 @@ func TestFailClosedDisablesAllAdaptersDespitePartialFailure(t *testing.T) {
 	s := newSeq()
 	twoAds := `[{"Name":"Adapter1","Status":"Up"},{"Name":"Adapter2","Status":"Up"}]`
 	s.script(psPrefix("Get-NetAdapter"), twoAds)
-	s.script(tailscale.ExePath+" status --json", stNeedsLogin)
+	pr := &fakeProbe{errs: []error{errDown}}
 	s.f.Errors[s.f.Key("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
 		"Disable-NetAdapter -Name 'Adapter1' -Confirm:$false")] = errors.New("access denied")
 	c := &clock{t: time.Unix(1000, 0), step: 30 * time.Second}
-	d := deps(t, s, c)
+	d := deps(t, s, c, pr)
 
 	err := Run(context.Background(), d)
 	if err == nil || !strings.Contains(err.Error(), "E50") {
@@ -271,7 +293,7 @@ func TestFailClosedRemediatesWithCancelledContext(t *testing.T) {
 	s.script(psPrefix("Get-NetAdapter"), adUp)
 	c := &clock{t: time.Unix(1000, 0), step: time.Second}
 	cr := ctxCheckingRunner{inner: s}
-	d := deps(t, cr, c)
+	d := deps(t, cr, c, &fakeProbe{errs: []error{errDown}})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -295,7 +317,7 @@ func TestWaitLinkUpFailureSetsErrorBeacon(t *testing.T) {
 	s := newSeq()
 	s.f.Errors[psPrefix("Get-NetAdapter")] = errors.New("wmi failure")
 	c := &clock{t: time.Unix(1000, 0), step: time.Second}
-	d := deps(t, s, c)
+	d := deps(t, s, c, &fakeProbe{errs: []error{errDown}})
 
 	err := Run(context.Background(), d)
 	if err == nil {

@@ -1,6 +1,6 @@
 // Package connect runs the online half of the workflow (spec §9 and §10):
-// wait for a link, verify the tunnel is to the responder, start Velociraptor,
-// then watch the tunnel and fail closed if it is lost.
+// wait for a link, verify the server is ours via a pinned-CA TLS probe,
+// start Velociraptor, then watch the probe and fail closed if it is lost.
 package connect
 
 import (
@@ -12,8 +12,8 @@ import (
 
 	"github.com/dfirtnt/DFIRMedic/internal/audit"
 	"github.com/dfirtnt/DFIRMedic/internal/config"
+	"github.com/dfirtnt/DFIRMedic/internal/probe"
 	"github.com/dfirtnt/DFIRMedic/internal/runner"
-	"github.com/dfirtnt/DFIRMedic/internal/tailscale"
 	"github.com/dfirtnt/DFIRMedic/internal/ui"
 	"github.com/dfirtnt/DFIRMedic/internal/velo"
 	"github.com/dfirtnt/DFIRMedic/internal/win"
@@ -27,7 +27,7 @@ type Deps struct {
 	Man     *audit.Manifest
 	Beacon  *ui.Beacon
 	Net     win.Net
-	TS      tailscale.Client
+	Probe   probe.Prober
 	Velo    velo.Client
 	Now     func() time.Time
 	Sleep   func(ctx context.Context, d time.Duration) error
@@ -85,12 +85,19 @@ func WaitLinkUp(ctx context.Context, d Deps) error {
 	}
 }
 
-func (d Deps) responderOnline(ctx context.Context) bool {
-	st, err := d.TS.Status(ctx)
-	if err != nil {
-		return false
+// serverVerified is the tunnel-verified condition from spec 2026-09-05 §7:
+// a TLS handshake with server_ip:port whose certificate chains to the CA in
+// the shipped client config. A captive portal or a stranger on that IP
+// cannot pass it.
+func (d Deps) serverVerified(ctx context.Context) (string, bool) {
+	if d.Probe == nil {
+		return "", false
 	}
-	return st.ResponderOnline(d.Inc.Tailscale.ResponderNodeKey)
+	fp, err := d.Probe.Verify(ctx)
+	if err != nil {
+		return "", false
+	}
+	return fp, true
 }
 
 func Run(ctx context.Context, d Deps) error {
@@ -106,16 +113,21 @@ func Run(ctx context.Context, d Deps) error {
 	d.Beacon.Set(ui.Staging, "Connecting")
 
 	deadline := d.Now().Add(time.Duration(d.Inc.Watchdog.TunnelTimeoutSec) * time.Second)
-	for !d.responderOnline(ctx) {
+	var leaf string
+	for {
+		var ok bool
+		if leaf, ok = d.serverVerified(ctx); ok {
+			break
+		}
 		if !d.Now().Before(deadline) {
-			return FailClosed(ctx, d, "E50 tunnel not established in time")
+			return FailClosed(ctx, d, "E50 server not verified in time")
 		}
 		if err := d.Sleep(ctx, d.Poll); err != nil {
-			d.Beacon.Set(ui.Error, fmt.Sprintf("tunnel verification interrupted: %v", err))
+			d.Beacon.Set(ui.Error, fmt.Sprintf("server verification interrupted: %v", err))
 			return err
 		}
 	}
-	_ = d.Log.Record("tunnel_verified", map[string]string{"responder_node_key": d.Inc.Tailscale.ResponderNodeKey})
+	_ = d.Log.Record("server_verified", map[string]string{"server": d.Inc.Server.IP, "leaf_sha256": leaf})
 
 	if err := d.Velo.Start(ctx); err != nil {
 		return FailClosed(ctx, d, "E52 Velociraptor failed to start")
@@ -133,14 +145,14 @@ func Run(ctx context.Context, d Deps) error {
 			if errors.Is(err, context.Canceled) {
 				return nil
 			}
-			return FailClosed(ctx, d, fmt.Sprintf("E51 tunnel lost (sleep error: %v)", err))
+			return FailClosed(ctx, d, fmt.Sprintf("E51 server unreachable (sleep error: %v)", err))
 		}
-		if d.responderOnline(ctx) {
+		if _, ok := d.serverVerified(ctx); ok {
 			lastOK = d.Now()
 			continue
 		}
 		if d.Now().Sub(lastOK) > grace {
-			return FailClosed(ctx, d, "E51 tunnel lost")
+			return FailClosed(ctx, d, "E51 server unreachable")
 		}
 	}
 }
