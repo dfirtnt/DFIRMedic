@@ -4316,7 +4316,13 @@ func (o *Options) defaults() {
 	}
 }
 
-func (o Options) incident() *config.Incident {
+// incident builds the signed config. payloadManifestSHA256 must be
+// manifest.HashFile of the OutDir's already-written payload/manifest.sha256 —
+// this is what binds the (otherwise unsigned) payload manifest to the
+// signature, so a tampered payload file plus a regenerated manifest.sha256
+// cannot pass internal/stage's Preflight (its E17 check compares against
+// this same field). See internal/stage's E13/E17 checks.
+func (o Options) incident(payloadManifestSHA256 string) *config.Incident {
 	now := o.Now().UTC()
 	return &config.Incident{
 		Schema: 1, CaseID: o.CaseID, CreatedUTC: now, ExpiresUTC: now.Add(o.TTL),
@@ -4326,6 +4332,7 @@ func (o Options) incident() *config.Incident {
 		Watchdog: config.Watchdog{TunnelTimeoutSec: o.TunnelTimeoutSec, HeartbeatGraceSec: o.HeartbeatGraceSec},
 		Contact:  config.Contact{Name: o.ContactName, Phone: o.ContactPhone},
 		BreakglassCodeHash: teardown.CodeHash(o.BreakglassCode),
+		PayloadManifestSHA256: "sha256:" + payloadManifestSHA256,
 	}
 }
 
@@ -4333,10 +4340,6 @@ func Build(o Options) (*Result, error) {
 	o.defaults()
 	if o.BreakglassCode == "" {
 		return nil, errors.New("break-glass code required")
-	}
-	inc := o.incident()
-	if err := inc.Validate(o.Now()); err != nil {
-		return nil, fmt.Errorf("incident config: %w", err)
 	}
 	if st, err := os.Stat(o.PayloadDir); err != nil || !st.IsDir() {
 		return nil, fmt.Errorf("payload dir %s: not a directory", o.PayloadDir)
@@ -4355,6 +4358,16 @@ func Build(o Options) (*Result, error) {
 	}
 	if _, err := manifest.Write(filepath.Join(o.OutDir, "payload")); err != nil {
 		return nil, err
+	}
+	// The manifest must exist on disk before we can bind its hash into the
+	// signed incident.json, so incident() is called only from here on.
+	manifestHash, err := manifest.HashFile(filepath.Join(o.OutDir, "payload", manifest.FileName))
+	if err != nil {
+		return nil, fmt.Errorf("hash payload manifest: %w", err)
+	}
+	inc := o.incident(manifestHash)
+	if err := inc.Validate(o.Now()); err != nil {
+		return nil, fmt.Errorf("incident config: %w", err)
 	}
 	if err := copyFile(o.ExePath, filepath.Join(o.OutDir, "dfirmedic.exe")); err != nil {
 		return nil, fmt.Errorf("copy orchestrator: %w", err)
@@ -4405,6 +4418,13 @@ func Verify(kitDir string, pub ed25519.PublicKey, now time.Time) (*config.Incide
 	}
 	if err := inc.Validate(now); err != nil {
 		return nil, err
+	}
+	manifestHash, err := manifest.HashFile(filepath.Join(kitDir, "payload", manifest.FileName))
+	if err != nil {
+		return nil, fmt.Errorf("hash payload manifest: %w", err)
+	}
+	if "sha256:"+manifestHash != inc.PayloadManifestSHA256 {
+		return nil, errors.New("payload manifest hash does not match signed incident.json — kit may have been tampered with")
 	}
 	if _, err := manifest.Verify(filepath.Join(kitDir, "payload")); err != nil {
 		return nil, err

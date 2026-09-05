@@ -114,11 +114,14 @@ Velociraptor's offline-collector repacking embeds config into the PE and invalid
     "phone": "+1 …",
     "name": "…"
   },
-  "breakglass_code_hash": "sha256:…"
+  "breakglass_code_hash": "sha256:…",
+  "payload_manifest_sha256": "sha256:…"
 }
 ```
 
 The signature is verified against an ed25519 public key compiled into `dfirmedic.exe`. An unsigned or expired config is fatal in preflight. The auth key is the only secret on the stick; it is ephemeral, single-use, tagged, and expires on its own.
+
+`payload_manifest_sha256` is the sha256 of `payload/manifest.sha256` itself (§6's per-file hash listing), carried inside the signed config. Without this field, the per-file manifest would be just another file on the USB — an attacker with physical access could swap a payload binary and regenerate `manifest.sha256` to match, and preflight's payload check (§8.1) would accept it. Binding the manifest's own hash into the signed `incident.json` means a tampered manifest can't be regenerated without the responder's private key. `dfirmedic build` computes this after writing the payload manifest and before signing; `dfirmedic verify` and preflight both check it before trusting the per-file manifest.
 
 ## 8. Staging state machine
 
@@ -128,6 +131,7 @@ The signature is verified against an ed25519 public key compiled into `dfirmedic
 
 - Confirm elevation. The binary's embedded manifest requests `requireAdministrator` so UAC prompts up front rather than failing mid-staging.
 - Verify `incident.json.sig`. Reject if invalid or `expires_utc` has passed.
+- Verify SHA-256 of `payload/manifest.sha256` itself against the signed `payload_manifest_sha256`. This is what stops a regenerated manifest from covering a swapped payload file.
 - Verify SHA-256 of every file under `payload/` against `manifest.sha256`.
 - **Refuse to proceed if any non-loopback adapter has connectivity.** This is the check that protects the core requirement. Applies to `stage` only, not to service auto-start after reboot.
 - Check Windows version, disk space, and that Tailscale and Velociraptor are not already installed.
