@@ -27,6 +27,33 @@ func TestParseStageFlags(t *testing.T) {
 	}
 }
 
+func TestExeDir(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`C:\usb\dfirmedic.exe`, `C:\usb`}, // existing multi-segment case
+		{`E:\dfirmedic.exe`, `E:\`},        // drive root
+		{`/dfirmedic`, `/`},                // POSIX root
+		{`/x/dfirmedic`, `/x`},             // POSIX multi-segment
+		{`dfirmedic`, `.`},                 // no separator
+	}
+	for _, c := range cases {
+		if got := exeDir(c.in); got != c.want {
+			t.Errorf("exeDir(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestParseStageRejectsWorkDirWithSpace(t *testing.T) {
+	if _, err := parseStage([]string{"--workdir", `C:\IR Cases\x`}, "/x/dfirmedic"); err == nil {
+		t.Fatal("expected error for --workdir containing a space")
+	}
+}
+
+func TestParseStageRejectsWorkDirWithQuote(t *testing.T) {
+	if _, err := parseStage([]string{"--workdir", `C:\IR"Cases\x`}, "/x/dfirmedic"); err == nil {
+		t.Fatal("expected error for --workdir containing a quote")
+	}
+}
+
 func TestDefaultWorkDir(t *testing.T) {
 	got := defaultWorkDir("CASE-1")
 	if runtime.GOOS == "windows" {

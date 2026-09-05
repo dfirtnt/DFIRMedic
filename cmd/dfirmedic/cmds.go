@@ -42,7 +42,28 @@ func parseStage(args []string, exePath string) (stageOpts, error) {
 	fs.StringVar(&o.Kit, "kit", exeDir(exePath), "kit directory (default: directory of this executable)")
 	fs.StringVar(&o.WorkDir, "workdir", "", "working directory (default: C:\\ProgramData\\DFIRMedic\\<case_id>)")
 	fs.BoolVar(&o.DryRun, "dry-run", false, "log every command without executing")
-	return o, fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return o, err
+	}
+	if err := validateWorkDir(o.WorkDir); err != nil {
+		return o, err
+	}
+	return o, nil
+}
+
+// validateWorkDir rejects a --workdir value that would break unquoted
+// re-parsing of the scheduled task command line CreateStartupTask registers
+// for reboot-resume (internal/win.Sys.CreateStartupTask builds /TR as
+// `"<exe>" <args>` with args, including "--workdir <value>", left unquoted).
+// A space would truncate the value when Windows re-parses that command line
+// on reboot, and a quote would let the value break out of/interfere with
+// argument boundaries; both are rejected up front so the failure is visible
+// at install time instead of silently at reboot-resume time.
+func validateWorkDir(v string) error {
+	if strings.ContainsAny(v, " \"") {
+		return fmt.Errorf("--workdir must not contain spaces or quotes: %q", v)
+	}
+	return nil
 }
 
 // exeDir returns the directory portion of an executable path. It splits on
@@ -54,10 +75,17 @@ func parseStage(args []string, exePath string) (stageOpts, error) {
 // Windows-style path like `C:\usb\dfirmedic.exe` would resolve to "." when
 // the test (or a cross-compiled tool) runs on a non-Windows host.
 func exeDir(exePath string) string {
-	if i := strings.LastIndexAny(exePath, `/\`); i > 0 {
+	i := strings.LastIndexAny(exePath, `/\`)
+	switch {
+	case i < 0:
+		return "."
+	case i == 0: // "/foo" -> "/"
+		return exePath[:1]
+	case i == 2 && exePath[1] == ':': // `E:\foo` -> `E:\`
+		return exePath[:3]
+	default:
 		return exePath[:i]
 	}
-	return "."
 }
 
 func defaultWorkDir(caseID string) string {
@@ -250,6 +278,10 @@ func cmdConnect(args []string) int {
 		fmt.Fprintln(os.Stderr, "connect: --workdir required")
 		return 2
 	}
+	if err := validateWorkDir(*workDir); err != nil {
+		fmt.Fprintln(os.Stderr, "connect:", err)
+		return 2
+	}
 	h, err := openHost(*workDir, *workDir, *dry)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -272,6 +304,10 @@ func cmdTeardown(args []string) int {
 	dry := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil || *workDir == "" {
 		fmt.Fprintln(os.Stderr, "teardown: --workdir required")
+		return 2
+	}
+	if err := validateWorkDir(*workDir); err != nil {
+		fmt.Fprintln(os.Stderr, "teardown:", err)
 		return 2
 	}
 	h, err := openHost(*workDir, *workDir, *dry)
@@ -305,6 +341,10 @@ func cmdBreakglass(args []string) int {
 	code := fs.String("code", "", "break-glass code from the responder")
 	if err := fs.Parse(args); err != nil || *workDir == "" || *code == "" {
 		fmt.Fprintln(os.Stderr, "breakglass: --workdir and --code required")
+		return 2
+	}
+	if err := validateWorkDir(*workDir); err != nil {
+		fmt.Fprintln(os.Stderr, "breakglass:", err)
 		return 2
 	}
 	h, err := openHost(*workDir, *workDir, false)
