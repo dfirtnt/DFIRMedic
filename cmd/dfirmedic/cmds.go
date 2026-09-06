@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -303,7 +304,32 @@ func cmdStage(args []string) int {
 		hold()
 		return 1
 	}
-	return runConnect(c, h, workDir)
+	return execConnect(workDir)
+}
+
+// execConnect hands the connect phase to the dfirmedic.exe copy BASELINE
+// placed in workDir, as a new process, instead of continuing in this one.
+// The quarantine firewall rule's orchestrator-probe allow-rule (stage.go
+// ServerRules) is scoped to that copy's path — Windows Firewall matches a
+// program rule against the on-disk path of the running image, so if this
+// process (launched from wherever the kit was extracted) probed the server
+// itself, the rule would not cover it and the dial would fail closed
+// (WSAEACCES). Running the copy also matches the reboot-resume path, which
+// already invokes `connect` this same way via the scheduled task.
+func execConnect(workDir string) int {
+	exe := filepath.Join(workDir, "dfirmedic.exe")
+	cmd := exec.Command(exe, "connect", "--workdir", workDir)
+	cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return exitErr.ExitCode()
+		}
+		fmt.Fprintln(os.Stderr, "connect handoff:", err)
+		hold()
+		return 1
+	}
+	return 0
 }
 
 func runConnect(c context.Context, h *host, workDir string) int {
