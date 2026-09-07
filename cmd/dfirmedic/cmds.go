@@ -266,6 +266,18 @@ var hold = func() {
 	<-ch
 }
 
+// holdIfConsole is hold(), skipped when there is no interactive console.
+// cmdConnect serves both the double-click path (a real console, inherited
+// from the exec.Command in execConnect) and the reboot-resume path (a
+// SYSTEM-owned scheduled task with no console at all) - hold() there would
+// block forever waiting for a Ctrl-C nothing can ever send, instead of
+// letting the process exit with its real status.
+func holdIfConsole() {
+	if hasConsole() {
+		hold()
+	}
+}
+
 func ctx() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 }
@@ -340,40 +352,60 @@ func runConnect(c context.Context, h *host, workDir string) int {
 	}
 	if err := connect.Run(c, d); err != nil {
 		_ = h.log.Record("error", map[string]string{"error": err.Error()})
-		hold()
+		holdIfConsole()
 		return 1
 	}
 	return 0
 }
 
-func cmdConnect(args []string) int {
+type connectOpts struct {
+	WorkDir string
+	DryRun  bool
+}
+
+// parseConnect defaults --workdir to the directory of this executable, the
+// same way parseStage defaults --kit: dfirmedic.exe is copied into workDir
+// in BASELINE precisely so a copy running from there needs no flag at all.
+func parseConnect(args []string, exePath string) (connectOpts, error) {
+	var o connectOpts
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
-	workDir := fs.String("workdir", "", "working directory")
-	dry := fs.Bool("dry-run", false, "")
-	if err := fs.Parse(args); err != nil || *workDir == "" {
-		fmt.Fprintln(os.Stderr, "connect: --workdir required")
-		return 2
+	fs.StringVar(&o.WorkDir, "workdir", exeDir(exePath), "working directory (default: directory of this executable)")
+	fs.BoolVar(&o.DryRun, "dry-run", false, "")
+	if err := fs.Parse(args); err != nil {
+		return o, err
 	}
-	if err := validateWorkDir(*workDir); err != nil {
+	if o.WorkDir == "" {
+		return o, errors.New("--workdir required (could not determine this executable's directory)")
+	}
+	if err := validateWorkDir(o.WorkDir); err != nil {
+		return o, err
+	}
+	return o, nil
+}
+
+func cmdConnect(args []string) int {
+	exe, _ := os.Executable()
+	o, err := parseConnect(args, exe)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "connect:", err)
 		return 2
 	}
-	h, err := openHost(*workDir, *workDir, *dry)
+	h, err := openHost(o.WorkDir, o.WorkDir, o.DryRun)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		hold()
+		holdIfConsole()
 		return 1
 	}
 	if err := verifyKitForConnect(h); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		_ = h.log.Record("error", map[string]string{"error": err.Error()})
 		h.beacon.Set(ui.Error, firstWord(err.Error())+" — kit verification failed")
-		hold()
+		holdIfConsole()
 		return 1
 	}
 	c, cancel := ctx()
 	defer cancel()
-	return runConnect(c, h, *workDir)
+	return runConnect(c, h, o.WorkDir)
 }
 
 func teardownDeps(h *host, workDir string) teardown.Deps {
@@ -381,33 +413,52 @@ func teardownDeps(h *host, workDir string) teardown.Deps {
 		FW: h.fw, Net: h.net, Sys: h.sys, Velo: h.velo, Now: time.Now}
 }
 
-func cmdTeardown(args []string) int {
+type teardownOpts struct {
+	WorkDir string
+	Purge   bool
+	DryRun  bool
+}
+
+// parseTeardown defaults --workdir the same way parseConnect does.
+func parseTeardown(args []string, exePath string) (teardownOpts, error) {
+	var o teardownOpts
 	fs := flag.NewFlagSet("teardown", flag.ContinueOnError)
-	workDir := fs.String("workdir", "", "working directory")
-	purge := fs.Bool("purge", false, "delete the working directory afterwards")
-	dry := fs.Bool("dry-run", false, "")
-	if err := fs.Parse(args); err != nil || *workDir == "" {
-		fmt.Fprintln(os.Stderr, "teardown: --workdir required")
-		return 2
+	fs.StringVar(&o.WorkDir, "workdir", exeDir(exePath), "working directory (default: directory of this executable)")
+	fs.BoolVar(&o.Purge, "purge", false, "delete the working directory afterwards")
+	fs.BoolVar(&o.DryRun, "dry-run", false, "")
+	if err := fs.Parse(args); err != nil {
+		return o, err
 	}
-	if err := validateWorkDir(*workDir); err != nil {
+	if o.WorkDir == "" {
+		return o, errors.New("--workdir required (could not determine this executable's directory)")
+	}
+	if err := validateWorkDir(o.WorkDir); err != nil {
+		return o, err
+	}
+	return o, nil
+}
+
+func cmdTeardown(args []string) int {
+	exe, _ := os.Executable()
+	o, err := parseTeardown(args, exe)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "teardown:", err)
 		return 2
 	}
-	h, err := openHost(*workDir, *workDir, *dry)
+	h, err := openHost(o.WorkDir, o.WorkDir, o.DryRun)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 	c, cancel := ctx()
 	defer cancel()
-	err = teardown.Run(c, teardownDeps(h, *workDir))
+	err = teardown.Run(c, teardownDeps(h, o.WorkDir))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "teardown completed with errors:\n", err)
 	}
-	if *purge && !*dry {
+	if o.Purge && !o.DryRun {
 		h.log.Close()
-		if rmErr := os.RemoveAll(*workDir); rmErr != nil {
+		if rmErr := os.RemoveAll(o.WorkDir); rmErr != nil {
 			fmt.Fprintln(os.Stderr, rmErr)
 			return 1
 		}
@@ -419,26 +470,47 @@ func cmdTeardown(args []string) int {
 	return 0
 }
 
-func cmdBreakglass(args []string) int {
+type breakglassOpts struct {
+	WorkDir string
+	Code    string
+}
+
+// parseBreakglass defaults --workdir the same way parseConnect does.
+func parseBreakglass(args []string, exePath string) (breakglassOpts, error) {
+	var o breakglassOpts
 	fs := flag.NewFlagSet("breakglass", flag.ContinueOnError)
-	workDir := fs.String("workdir", "", "working directory")
-	code := fs.String("code", "", "break-glass code from the responder")
-	if err := fs.Parse(args); err != nil || *workDir == "" || *code == "" {
-		fmt.Fprintln(os.Stderr, "breakglass: --workdir and --code required")
-		return 2
+	fs.StringVar(&o.WorkDir, "workdir", exeDir(exePath), "working directory (default: directory of this executable)")
+	fs.StringVar(&o.Code, "code", "", "break-glass code from the responder")
+	if err := fs.Parse(args); err != nil {
+		return o, err
 	}
-	if err := validateWorkDir(*workDir); err != nil {
+	if o.WorkDir == "" {
+		return o, errors.New("--workdir (could not determine this executable's directory) and --code required")
+	}
+	if o.Code == "" {
+		return o, errors.New("--code required")
+	}
+	if err := validateWorkDir(o.WorkDir); err != nil {
+		return o, err
+	}
+	return o, nil
+}
+
+func cmdBreakglass(args []string) int {
+	exe, _ := os.Executable()
+	o, err := parseBreakglass(args, exe)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "breakglass:", err)
 		return 2
 	}
-	h, err := openHost(*workDir, *workDir, false)
+	h, err := openHost(o.WorkDir, o.WorkDir, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 	c, cancel := ctx()
 	defer cancel()
-	if err := teardown.Breakglass(c, teardownDeps(h, *workDir), *code); err != nil {
+	if err := teardown.Breakglass(c, teardownDeps(h, o.WorkDir), o.Code); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}

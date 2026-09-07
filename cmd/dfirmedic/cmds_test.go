@@ -34,6 +34,45 @@ func TestParseStageFlags(t *testing.T) {
 	}
 }
 
+func TestParseConnectDefaultsWorkDirToExeDir(t *testing.T) {
+	o, err := parseConnect([]string{}, `C:\ProgramData\DFIRMedic\CASE-1\dfirmedic.exe`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.WorkDir != `C:\ProgramData\DFIRMedic\CASE-1` {
+		t.Fatal(o.WorkDir)
+	}
+}
+
+func TestParseTeardownDefaultsWorkDirToExeDir(t *testing.T) {
+	o, err := parseTeardown([]string{}, `C:\ProgramData\DFIRMedic\CASE-1\dfirmedic.exe`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.WorkDir != `C:\ProgramData\DFIRMedic\CASE-1` {
+		t.Fatal(o.WorkDir)
+	}
+}
+
+func TestParseBreakglassDefaultsWorkDirToExeDir(t *testing.T) {
+	o, err := parseBreakglass([]string{"--code", "abcd1234"}, `C:\ProgramData\DFIRMedic\CASE-1\dfirmedic.exe`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.WorkDir != `C:\ProgramData\DFIRMedic\CASE-1` {
+		t.Fatal(o.WorkDir)
+	}
+	if o.Code != "abcd1234" {
+		t.Fatal(o.Code)
+	}
+}
+
+func TestParseBreakglassRequiresCode(t *testing.T) {
+	if _, err := parseBreakglass([]string{}, `C:\ProgramData\DFIRMedic\CASE-1\dfirmedic.exe`); err == nil {
+		t.Fatal("expected error for missing --code")
+	}
+}
+
 func TestExeDir(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{`C:\usb\dfirmedic.exe`, `C:\usb`}, // existing multi-segment case
