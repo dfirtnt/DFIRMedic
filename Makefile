@@ -20,6 +20,7 @@ build-darwin:
 	GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "$(LDFLAGS)" -o dist/dfirmedic ./cmd/dfirmedic
 
 check: vet test
+	test -z "$$(gofmt -l cmd internal)"
 	GOOS=windows GOARCH=amd64 go build -o /dev/null ./cmd/dfirmedic
 
 clean:

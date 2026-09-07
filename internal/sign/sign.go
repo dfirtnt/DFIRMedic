@@ -12,7 +12,8 @@ import (
 )
 
 // Set at build time:
-//   -ldflags "-X github.com/dfirtnt/DFIRMedic/internal/sign.embeddedPubKeyHex=<64 hex chars>"
+//
+//	-ldflags "-X github.com/dfirtnt/DFIRMedic/internal/sign.embeddedPubKeyHex=<64 hex chars>"
 var embeddedPubKeyHex string
 
 func GenerateKeypair() (ed25519.PublicKey, ed25519.PrivateKey, error) {
