@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -40,6 +41,11 @@ type Server struct {
 type Velo struct {
 	ConfigFile  string `json:"config_file"`
 	InstallPath string `json:"install_path"` // where `service install` puts the binary; the egress rule names it
+	// ServiceName is evidentiary only: build always sets it to velo.ServiceName
+	// (the Velociraptor Windows service name is not actually configurable),
+	// and every runtime check of the service uses that constant directly, not
+	// this field. Validate still requires it non-empty so a signed
+	// incident.json always records the name the responder built against.
 	ServiceName string `json:"service_name"`
 }
 
@@ -70,6 +76,22 @@ var (
 	// (to the directory it is about to delete) as defence in depth.
 	installPathRe = regexp.MustCompile(`^[A-Za-z]:\\[^\\]+\\[^\\]+`)
 )
+
+// hasDotSegment reports whether any backslash-separated segment of path is
+// exactly "." or "..". installPathRe checks shape only, so an install_path
+// of `C:\a\..\..\..\Windows\x.exe` passes it and hands
+// `C:\a\..\..\..\Windows` to teardown's `rmdir /s /q`, which Windows
+// resolves to `C:\Windows`. The field is signed and responder-authored, but
+// signing does not make a dangerous shape safe - the same rationale that
+// rejects a drive-root install_path applies here.
+func hasDotSegment(path string) bool {
+	for _, seg := range strings.Split(path, `\`) {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
+}
 
 // Load reads and parses path. The raw bytes are returned so the caller can
 // verify the detached signature over exactly what was on disk.
@@ -111,9 +133,9 @@ func (i *Incident) Validate(now time.Time) error {
 	if i.Velociraptor.ConfigFile == "" {
 		errs = append(errs, errors.New("velociraptor.config_file required"))
 	}
-	if !installPathRe.MatchString(i.Velociraptor.InstallPath) {
-		errs = append(errs, fmt.Errorf("velociraptor.install_path must be an absolute Windows path of at least "+
-			`<drive>:\<dir>\<file> (set windows_installer.install_path in the Velociraptor client config), got %q`,
+	if !installPathRe.MatchString(i.Velociraptor.InstallPath) || hasDotSegment(i.Velociraptor.InstallPath) {
+		errs = append(errs, fmt.Errorf(`velociraptor.install_path must be an absolute Windows path of at least `+
+			`<drive>:\<dir>\<file> with no "." or ".." segments (set windows_installer.install_path in the Velociraptor client config), got %q`,
 			i.Velociraptor.InstallPath))
 	}
 	if i.Velociraptor.ServiceName == "" {

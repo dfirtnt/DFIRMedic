@@ -33,6 +33,12 @@ chown velociraptor: /opt/velociraptor/server.config.yaml && chmod 0600 /opt/velo
 ufw default deny incoming && ufw allow 443/tcp && ufw allow in on tailscale0 && ufw enable
 ```
 
+`API.bind_address` above is loopback-only and needs no firewall rule or kit change, so its
+port is free to move. On a responder Mac running Docker Desktop, `config generate`'s default
+API port (8001) collides with Docker's own `*:8001` listener — check first with
+`lsof -nP -iTCP:8001 -sTCP:LISTEN` and add `"API": {"bind_address": "127.0.0.1", "bind_port": 8501}`
+(or any free port) to the merge above if it's taken.
+
 Binding to port 443 as a non-root user needs `setcap cap_net_bind_service=+ep /opt/velociraptor/velociraptor`
 or `AmbientCapabilities=CAP_NET_BIND_SERVICE` in the unit.
 
@@ -124,13 +130,17 @@ When the client appears in the GUI, run these before anything interactive, in th
    `manifest.json`, `audit.jsonl`, `baseline.json`, and `volatile\` (process tree with command
    lines, `netstat -anob`, DNS cache, ARP, routes, sessions, drivers, all as of before the kit
    touched the host). Verify the audit chain and the `volatile` hashes in `baseline.json` first.
-2. **`Windows.KapeFiles.Targets`** with `_KapeTriage` — raw `$MFT`, `$LogFile`, `$UsnJrnl:$J`, hives,
-   event logs, prefetch, Amcache, LNK/jumplists. This is the classic triage image; expect
-   1–3 GB over the tunnel.
-3. **`Windows.Sysinternals.Autoruns`** — the kit's own entries are the `Velociraptor`
-   service and the `DFIRMedic-<case>` task; everything else is the host's.
+2. **`Custom.Windows.KapeTriage`** — raw `$MFT`, `$LogFile`, `$UsnJrnl:$J`, hives, event logs,
+   prefetch, Amcache, LNK/jumplists via `Windows.Collectors.File`'s NTFS accessor. This server's
+   Velociraptor version has no `Windows.KapeFiles.Targets`/`_KapeTriage` (removed/renamed
+   upstream) — see `docs/triage-playbook.md` and `server/artifacts/`. Expect 1–3 GB over the
+   tunnel.
+3. **`Custom.DFIRMedic.BaselineTriage`** — bundles Autoruns, services, scheduled tasks, WMI
+   persistence, Prefetch/Shimcache/Amcache/UserAssist/BAM/RunMRU execution evidence, recent
+   LNK/RecycleBin, RDP logons, live process/network state, and a YARA sweep into one flow. See
+   `docs/triage-playbook.md` for the full source list and how it's loaded onto a server.
 4. **`Windows.Forensics.Prefetch`**, **`Windows.NTFS.MFT`**, **`Windows.Forensics.Usn`** as parsed
-   views when you want to query rather than download.
+   views when you want to query rather than download (also covered raw by step 2).
 
 Tool-backed artifacts fetch their binary from your server's tool cache, not the internet — see §3.
 
@@ -139,8 +149,9 @@ fires it the moment a victim checks in.
 
 ## 8. After the engagement
 
-From your workstation, over the tunnel: `dfirmedic.exe teardown --workdir C:\ProgramData\DFIRMedic\<case>`
-(via a Velociraptor `Windows.System.CmdShell` collection).
+From your workstation, over the tunnel: `C:\ProgramData\DFIRMedic\<case>\dfirmedic.exe teardown`
+(via a Velociraptor `Windows.System.CmdShell` collection) — `--workdir` defaults to the
+directory of that exe, so the full path above is all `CmdShell` needs.
 
 > **Launch teardown detached.** Teardown's first step stops the Velociraptor
 > service — the very channel you are watching the collection through — so a
@@ -177,8 +188,12 @@ back by itself after a reboot. Recovery is the local break-glass path: read the
 break-glass code to the on-site person and have them run
 
 ```
-dfirmedic.exe breakglass --workdir C:\ProgramData\DFIRMedic\<case> --code <code>
+dfirmedic.exe breakglass --code <code>
 ```
+
+run from `C:\ProgramData\DFIRMedic\<case>` — `--workdir` defaults to the directory of
+whichever `dfirmedic.exe` copy is running it, so no path needs to be read over the phone.
+Pass `--workdir` explicitly only when invoking a copy from somewhere else (e.g. the USB).
 
 which reverses staging (service, install directory, firewall, adapters) and puts the host
 back the way it was. Then fix the kit — the usual cause is an `install_path` in the client

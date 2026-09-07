@@ -1,0 +1,53 @@
+#!/bin/bash
+# Cloud-init user_data: mirrors docs/responder-setup.md §1 exactly.
+set -euxo pipefail
+
+apt-get update
+apt-get install -y curl ufw
+
+useradd --system --home /opt/velociraptor --shell /usr/sbin/nologin velociraptor || true
+mkdir -p /opt/velociraptor /var/lib/velociraptor
+chown velociraptor: /opt/velociraptor /var/lib/velociraptor
+
+curl -fsSL -o /opt/velociraptor/velociraptor \
+  https://github.com/Velocidex/velociraptor/releases/download/v${velociraptor_version}/velociraptor-v${velociraptor_version}-linux-amd64
+chmod 0755 /opt/velociraptor/velociraptor
+
+curl -fsSL https://tailscale.com/install.sh | sh
+tailscale up --authkey="${tailscale_authkey}" --ssh
+TAILNET_IP=$(tailscale ip -4)
+PUBLIC_IP=$(curl -fsS https://api.ipify.org)
+
+/opt/velociraptor/velociraptor config generate --merge "{
+  \"Frontend\": {\"hostname\": \"$PUBLIC_IP\", \"bind_address\": \"0.0.0.0\", \"bind_port\": 443},
+  \"GUI\": {\"bind_address\": \"$TAILNET_IP\", \"bind_port\": 8889, \"public_url\": \"https://$TAILNET_IP:8889/app/index.html\"},
+  \"API\": {\"bind_address\": \"127.0.0.1\"}, \"Monitoring\": {\"bind_address\": \"127.0.0.1\"},
+  \"Datastore\": {\"location\": \"/var/lib/velociraptor\", \"filestore_directory\": \"/var/lib/velociraptor\"},
+  \"Client\": {\"server_urls\": [\"https://$PUBLIC_IP:443/\"]}
+}" > /opt/velociraptor/server.config.yaml
+chown velociraptor: /opt/velociraptor/server.config.yaml
+chmod 0600 /opt/velociraptor/server.config.yaml
+
+/opt/velociraptor/velociraptor --config /opt/velociraptor/server.config.yaml \
+  user add --role=administrator admin "${velociraptor_admin_password}"
+/opt/velociraptor/velociraptor --config /opt/velociraptor/server.config.yaml service install
+
+ufw default deny incoming
+ufw allow 443/tcp
+ufw allow in on tailscale0
+ufw --force enable
+
+/opt/velociraptor/velociraptor --config /opt/velociraptor/server.config.yaml config client \
+  > /root/velociraptor.client.yaml
+echo "$PUBLIC_IP" > /root/public_ip.txt
+
+# This server's artifact set has no Windows.KapeFiles.Targets/_KapeTriage
+# (see docs/triage-playbook.md) — load the two DFIRMedic custom artifacts so
+# they're ready for the first collection without a manual step post-boot.
+mkdir -p /opt/velociraptor/custom-artifacts
+echo "${kape_triage_artifact_b64}" | base64 -d > /opt/velociraptor/custom-artifacts/Custom.Windows.KapeTriage.yaml
+echo "${baseline_triage_artifact_b64}" | base64 -d > /opt/velociraptor/custom-artifacts/Custom.DFIRMedic.BaselineTriage.yaml
+/opt/velociraptor/velociraptor --config /opt/velociraptor/server.config.yaml query \
+  "SELECT artifact_set(prefix='Custom.', definition=read_file(filename='/opt/velociraptor/custom-artifacts/Custom.Windows.KapeTriage.yaml')) FROM scope()"
+/opt/velociraptor/velociraptor --config /opt/velociraptor/server.config.yaml query \
+  "SELECT artifact_set(prefix='Custom.', definition=read_file(filename='/opt/velociraptor/custom-artifacts/Custom.DFIRMedic.BaselineTriage.yaml')) FROM scope()"

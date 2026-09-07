@@ -141,6 +141,7 @@ type Manifest struct {
 	Baseline           json.RawMessage      `json:"baseline,omitempty"`
 	Rules              []string             `json:"rules"`
 	DisabledRules      []string             `json:"disabled_rules"`
+	DisabledAdapters   []string             `json:"disabled_adapters"`
 	Commands           []Command            `json:"commands"`
 }
 

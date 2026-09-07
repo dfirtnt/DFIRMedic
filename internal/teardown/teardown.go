@@ -45,6 +45,20 @@ type Deps struct {
 // `C:\Program Files` and `C:\` do not.
 var safeInstallDirRe = regexp.MustCompile(`^[A-Za-z]:\\[^\\]+\\[^\\]+`)
 
+// hasDotSegment mirrors config.hasDotSegment: a "." or ".." segment in dir
+// would let `C:\a\..\..\..\Windows` (which passes safeInstallDirRe's shape
+// check) resolve to `C:\Windows` once handed to `rmdir /s /q`. config.Validate
+// already rejects this shape for a freshly built kit, but this is defence in
+// depth for a config that predates that check.
+func hasDotSegment(path string) bool {
+	for _, seg := range strings.Split(path, `\`) {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 // installDir returns the parent directory of a Windows-style install path,
 // e.g. `C:\Program Files\Velociraptor\Velociraptor.exe` ->
 // `C:\Program Files\Velociraptor`, or "" when that parent is not a safe
@@ -69,7 +83,7 @@ func installDir(path string) string {
 		return ""
 	}
 	dir := path[:i]
-	if !safeInstallDirRe.MatchString(dir) {
+	if !safeInstallDirRe.MatchString(dir) || hasDotSegment(dir) {
 		return ""
 	}
 	return dir
@@ -118,13 +132,37 @@ func Run(ctx context.Context, d Deps) error {
 	})
 	// connect.FailClosed disables every physical adapter when the watchdog
 	// fires, and that is exactly the state someone runs breakglass from, so
-	// restoring the firewall alone would leave the host still offline.
-	// Re-enabling an already-enabled adapter is a no-op, so enable them all
-	// rather than tracking which ones were disabled.
+	// restoring the firewall alone would leave the host still offline. Use
+	// the names FailClosed recorded, not a fresh PhysicalAdapters() query:
+	// a name from either list can be stale by the time teardown runs (a USB
+	// NIC unplugged, a virtual adapter torn down), and EnableAll now skips
+	// exactly that phantom-adapter error rather than aborting the batch on
+	// it (real-host test 2026-09-05: "enable Wi-Fi 5: ... Requested
+	// operation not supported on adapter", a name from a state list that no
+	// longer matched anything, when nothing had actually been disabled).
+	// A manifest from before this field existed falls back to whatever
+	// baseline.json recorded as Up - the best available guess at what a
+	// watchdog trip would have disabled.
 	step("re-enable network adapters", func() error {
-		ads, err := d.Net.PhysicalAdapters(ctx)
-		if err != nil {
-			return err
+		names := d.Man.DisabledAdapters
+		if len(names) == 0 {
+			raw, err := os.ReadFile(filepath.Join(d.WorkDir, "baseline.json"))
+			if err != nil {
+				return err
+			}
+			var base stage.Baseline
+			if err := json.Unmarshal(raw, &base); err != nil {
+				return err
+			}
+			for _, a := range base.Adapters {
+				if strings.EqualFold(a.Status, "Up") {
+					names = append(names, a.Name)
+				}
+			}
+		}
+		ads := make([]win.Adapter, len(names))
+		for i, n := range names {
+			ads[i] = win.Adapter{Name: n}
 		}
 		return d.Net.EnableAll(ctx, ads)
 	})

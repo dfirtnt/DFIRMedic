@@ -1,0 +1,50 @@
+name: Custom.DFIRMedic.BaselineTriage
+description: |
+  DFIRMedic generic host-compromise baseline triage. One collection, no
+  configuration, bundling the standard "is anything obviously wrong here"
+  checks: persistence, execution evidence, user activity, logon/lateral
+  movement, live process/network state, and a quick YARA sweep for a known
+  post-exploitation toolkit signature. Every sub-artifact name below was
+  checked against this server's actual artifact_definitions() on 2026-09-06
+  (see docs/triage-playbook.md) rather than assumed from memory or docs of
+  a different Velociraptor version.
+
+  This is breadth, not depth: it answers "where do I start" on a host with
+  no prior lead. For a specific IOC (hash, IP, known-bad path), search
+  directly instead — e.g. Windows.EventLogs.EvtxHunter with an IocRegex, or
+  Windows.Detection.Yara.Process with a case-specific rule swapped in for
+  the bundled default (which only matches one Cobalt Strike variant).
+type: CLIENT
+sources:
+  - name: Autoruns
+    query: SELECT * FROM Artifact.Windows.Sysinternals.Autoruns()
+  - name: Services
+    query: SELECT * FROM Artifact.Windows.System.Services()
+  - name: ScheduledTasks
+    query: SELECT * FROM Artifact.Windows.System.TaskScheduler()
+  - name: WMIPersistence
+    query: SELECT * FROM Artifact.Windows.Persistence.PermanentWMIEvents()
+  - name: Prefetch
+    query: SELECT * FROM Artifact.Windows.Forensics.Prefetch()
+  - name: Shimcache
+    query: SELECT * FROM Artifact.Windows.Registry.AppCompatCache()
+  - name: Amcache
+    query: SELECT * FROM Artifact.Windows.Forensics.Amcache()
+  - name: UserAssist
+    query: SELECT * FROM Artifact.Windows.Registry.UserAssist()
+  - name: BAM
+    query: SELECT * FROM Artifact.Windows.Forensics.Bam()
+  - name: RunMRU
+    query: SELECT * FROM Artifact.Windows.Timeline.Registry.RunMRU()
+  - name: RecentLnk
+    query: SELECT * FROM Artifact.Windows.Forensics.Lnk()
+  - name: RecycleBin
+    query: SELECT * FROM Artifact.Windows.Forensics.RecycleBin()
+  - name: RDPLogons
+    query: SELECT * FROM Artifact.Windows.EventLogs.RDPAuth()
+  - name: LiveNetstat
+    query: SELECT * FROM Artifact.Windows.Network.Netstat()
+  - name: LiveProcesses
+    query: SELECT * FROM Artifact.Windows.System.Pslist()
+  - name: YaraProcessSweep
+    query: SELECT * FROM Artifact.Windows.Detection.Yara.Process()

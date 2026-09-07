@@ -209,8 +209,13 @@ Manual-start until the probe passes. Unchanged behavior.
 
 Break-glass and teardown: remove the "tailscale logout" and "uninstall Tailscale" steps;
 add "delete `<install_path>`'s directory" after `service remove` so the Program Files
-copy does not outlive the engagement. Adapter re-enable and the rest of the open task list
-unchanged.
+copy does not outlive the engagement. Adapter re-enable no longer means "every physical
+adapter": `FailClosed` records the names it actually disabled (`manifest.json`
+`disabled_adapters`), and teardown/break-glass re-enable only those — falling back to the
+baseline's Up adapters for a manifest predating that field. A name from either list can be
+stale by the time teardown runs (a USB NIC unplugged, a virtual adapter torn down);
+`EnableAll` skips that specific phantom-adapter error rather than aborting the batch on it.
+The rest of the open task list unchanged.
 
 ## 9. What this supersedes in the 2026-09-04 spec
 

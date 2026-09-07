@@ -194,7 +194,16 @@ func TakeBaseline(ctx context.Context, d Deps) (*Baseline, error) {
 	if err != nil {
 		return nil, code("E20", "volatile capture", err)
 	}
-	if err := d.FW.Export(ctx, filepath.Join(d.WorkDir, "firewall-original.wfw")); err != nil {
+	// A rerun against an existing workdir (E30/E40 aborted a prior attempt
+	// without deleting it) must not re-export now: if that prior run reached
+	// QUARANTINE before failing, the host is already locked down, and
+	// exporting now would capture the locked-down policy as "original" -
+	// teardown would then "restore" the quarantine instead of undoing it.
+	// The already-captured original is the one that must survive.
+	wfwPath := filepath.Join(d.WorkDir, "firewall-original.wfw")
+	if _, err := os.Stat(wfwPath); err == nil {
+		_ = d.Log.Record("baseline_export_preserved", map[string]string{"path": wfwPath})
+	} else if err := d.FW.Export(ctx, wfwPath); err != nil {
 		return nil, code("E20", "firewall export", err)
 	}
 	b := &Baseline{TimeUTC: d.Now().UTC(), Volatile: volatile}

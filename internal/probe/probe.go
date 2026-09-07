@@ -72,7 +72,13 @@ func (p TLS) Verify(ctx context.Context) (string, error) {
 					inter.AddCert(c)
 				}
 			}
-			if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, Intermediates: inter, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}); err != nil {
+			// ExtKeyUsageServerAuth, not ExtKeyUsageAny: confirmed against a live
+			// Velociraptor 0.77.2 server on 2026-09-06 that its frontend leaf
+			// carries serverAuth (`openssl s_client -connect <ip>:443 </dev/null |
+			// openssl x509 -noout -ext extendedKeyUsage`), so requiring it here
+			// narrows what counts as "our server" without risking a false E50/E51
+			// against a real deployment.
+			if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, Intermediates: inter, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
 				return fmt.Errorf("certificate not signed by the pinned CA: %w", err)
 			}
 			sum := sha256.Sum256(rawCerts[0])

@@ -2,6 +2,8 @@ package win
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/dfirtnt/DFIRMedic/internal/runner"
@@ -45,5 +47,32 @@ func TestEnableAll(t *testing.T) {
 	if len(f.Calls) != 2 || f.Calls[0][len(f.Calls[0])-1] != "Enable-NetAdapter -Name 'Wi-Fi' -Confirm:$false" ||
 		f.Calls[1][len(f.Calls[1])-1] != "Enable-NetAdapter -Name 'Ethernet 2' -Confirm:$false" {
 		t.Fatalf("%v", f.Calls)
+	}
+}
+
+// TestEnableAllSkipsPhantomAdapterButReturnsOtherErrors pins the real-host
+// fix (2026-09-05: "enable Wi-Fi 5: ... Requested operation not supported on
+// adapter", a name that no longer resolved to a live device): that specific
+// error must not abort the batch or surface as a failure, but a genuinely
+// different error on another adapter still must, and every adapter is still
+// attempted regardless of an earlier one's outcome.
+func TestEnableAllSkipsPhantomAdapterButReturnsOtherErrors(t *testing.T) {
+	f := runner.NewFake()
+	f.Errors[f.Key("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+		"Enable-NetAdapter -Name 'Phantom' -Confirm:$false")] = &runner.ExitError{Result: runner.Result{
+		ExitCode: 1, Stderr: "Enable-NetAdapter : Requested operation not supported on adapter",
+	}}
+	f.Errors[f.Key("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+		"Enable-NetAdapter -Name 'Broken' -Confirm:$false")] = errors.New("some other real failure")
+
+	err := Net{R: f}.EnableAll(context.Background(), []Adapter{{Name: "Phantom"}, {Name: "Wi-Fi"}, {Name: "Broken"}})
+	if err == nil || !strings.Contains(err.Error(), "some other real failure") {
+		t.Fatalf("a non-phantom error must still be reported, got %v", err)
+	}
+	if strings.Contains(err.Error(), "not supported on adapter") {
+		t.Fatalf("a phantom-adapter error must be swallowed, got %v", err)
+	}
+	if len(f.Calls) != 3 {
+		t.Fatalf("every adapter must still be attempted despite the phantom failure, got %d calls: %v", len(f.Calls), f.Calls)
 	}
 }

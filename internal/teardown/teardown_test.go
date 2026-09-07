@@ -27,10 +27,11 @@ func deps(t *testing.T, f *runner.Fake) Deps {
 	inc := &config.Incident{CaseID: "C1", BreakglassCodeHash: CodeHash("hunter2")}
 	inc.Velociraptor = config.Velo{InstallPath: `C:\Program Files\Velociraptor\Velociraptor.exe`}
 	return Deps{
-		Inc: inc, WorkDir: work, R: f, Log: log, Man: &audit.Manifest{Phases: map[string]time.Time{}},
-		FW: win.Firewall{R: f}, Net: win.Net{R: f}, Sys: win.Sys{R: f},
+		Inc: inc, WorkDir: work, R: f, Log: log,
+		Man: &audit.Manifest{Phases: map[string]time.Time{}, DisabledAdapters: []string{"Wi-Fi"}},
+		FW:  win.Firewall{R: f}, Net: win.Net{R: f}, Sys: win.Sys{R: f},
 		Velo: velo.Client{R: f, ExePath: "v.exe", ConfigPath: "c.yaml"},
-		Now: func() time.Time { return time.Unix(2000, 0) },
+		Now:  func() time.Time { return time.Unix(2000, 0) },
 	}
 }
 
@@ -56,7 +57,7 @@ func TestRunOrder(t *testing.T) {
 		"schtasks.exe /Delete /TN DFIRMedic-C1 /F",
 		"Remove-NetFirewallRule -Group 'DFIRMedic-C1'",
 		"netsh.exe advfirewall import " + filepath.Join(d.WorkDir, "firewall-original.wfw"),
-		"Get-NetAdapter -Physical",
+		"Enable-NetAdapter -Name 'Wi-Fi' -Confirm:$false",
 		"Set-NetFirewallProfile -Profile 'Domain' -Enabled 'True' -DefaultInboundAction 'Block' -DefaultOutboundAction 'Allow'",
 	}
 	last := -1
@@ -103,6 +104,47 @@ func TestRunContinuesPastFailures(t *testing.T) {
 	}
 }
 
+// TestReenableAdaptersUsesOnlyRecordedNames proves teardown enables exactly
+// the adapters connect.FailClosed recorded as disabled, not every adapter
+// physically present when teardown happens to run - a live query can
+// include adapters this watchdog trip never touched (or, per the real-host
+// bug this fix closes, a name that no longer resolves to anything).
+func TestReenableAdaptersUsesOnlyRecordedNames(t *testing.T) {
+	f := runner.NewFake()
+	d := deps(t, f)
+	d.Man.DisabledAdapters = []string{"Ethernet0"}
+	if err := Run(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	a := all(f)
+	if !strings.Contains(a, "Enable-NetAdapter -Name 'Ethernet0' -Confirm:$false") {
+		t.Fatalf("must enable the recorded adapter:\n%s", a)
+	}
+	if strings.Contains(a, "Get-NetAdapter -Physical") {
+		t.Fatalf("must not query the live adapter list when a recorded list exists:\n%s", a)
+	}
+}
+
+// TestReenableAdaptersNoOpWithoutATrip proves a normal breakglass (no
+// watchdog trip ever happened, so nothing was ever disabled) issues no
+// Enable-NetAdapter call at all - not a no-op enable of everything present.
+func TestReenableAdaptersNoOpWithoutATrip(t *testing.T) {
+	f := runner.NewFake()
+	d := deps(t, f)
+	d.Man.DisabledAdapters = nil
+	base := map[string]any{"profiles": []map[string]any{{"Name": "Domain", "Enabled": true, "DefaultInboundAction": "Block", "DefaultOutboundAction": "Allow"}}}
+	raw, _ := json.Marshal(base)
+	if err := os.WriteFile(filepath.Join(d.WorkDir, "baseline.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	if a := all(f); strings.Contains(a, "Enable-NetAdapter") {
+		t.Fatalf("must not enable anything when nothing was ever disabled:\n%s", a)
+	}
+}
+
 func TestBreakglassRejectsWrongCode(t *testing.T) {
 	f := runner.NewFake()
 	d := deps(t, f)
@@ -142,10 +184,12 @@ func TestInstallDir(t *testing.T) {
 	}{
 		{`C:\Program Files\Velociraptor\Velociraptor.exe`, `C:\Program Files\Velociraptor`},
 		{`C:\ProgramData\DFIRMedic\payload\Velociraptor.exe`, `C:\ProgramData\DFIRMedic\payload`},
-		{`C:\Velociraptor.exe`, ``},               // drive root: refuse
-		{`E:\Velociraptor.exe`, ``},               // drive root: refuse
-		{`C:\Program Files\Velociraptor.exe`, ``}, // would delete all of Program Files: refuse
-		{`Velociraptor.exe`, ``},                  // no separator at all: refuse
+		{`C:\Velociraptor.exe`, ``},                              // drive root: refuse
+		{`E:\Velociraptor.exe`, ``},                              // drive root: refuse
+		{`C:\Program Files\Velociraptor.exe`, ``},                // would delete all of Program Files: refuse
+		{`Velociraptor.exe`, ``},                                 // no separator at all: refuse
+		{`C:\a\..\..\..\Windows\x.exe`, ``},                      // ".." resolves above the shown depth: refuse
+		{`C:\Program Files\.\Velociraptor\Velociraptor.exe`, ``}, // "." segment: refuse
 	}
 	for _, c := range cases {
 		if got := installDir(c.path); got != c.want {

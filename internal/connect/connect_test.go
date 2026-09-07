@@ -212,6 +212,65 @@ func TestVelociraptorStartFailure(t *testing.T) {
 	}
 }
 
+// TestProbeTrackerFloorLimitsAlternatingErrors proves probeTracker.fail no
+// longer writes a probe_failed record on every single call when the error
+// text alternates: "msg != t.recorded" alone was true on every call for two
+// alternating texts, defeating probeLogEvery's rate limit entirely. The
+// floor caps that at roughly one record per probeLogFloor calls regardless
+// of how often the text changes.
+func TestProbeTrackerFloorLimitsAlternatingErrors(t *testing.T) {
+	s := newSeq()
+	c := &clock{t: time.Unix(1000, 0)}
+	d := deps(t, s, c, &fakeProbe{})
+	pt := &probeTracker{}
+	msgs := []string{"error A", "error B"}
+	const calls = 40
+	for i := 0; i < calls; i++ {
+		pt.fail(d, msgs[i%2])
+	}
+	raw, err := os.ReadFile(filepath.Join(d.WorkDir, "audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := strings.Count(string(raw), `"event":"probe_failed"`)
+	if n < 1 {
+		t.Fatal("must still log at least the first failure")
+	}
+	if n > calls/probeLogFloor+2 {
+		t.Fatalf("floor should bound records to roughly one per %d calls, got %d records for %d calls", probeLogFloor, n, calls)
+	}
+}
+
+// TestHeartbeatSleepErrorReasonIncludesLastProbeError proves the sleep-error
+// E51 branch no longer discards diagnostic information: it used to build its
+// reason with a bare fmt.Sprintf, which meant a genuine prior probe failure
+// (the reason the connection was already in trouble) never reached the
+// beacon or the responder, only the sleep mechanism's own error text.
+func TestHeartbeatSleepErrorReasonIncludesLastProbeError(t *testing.T) {
+	s := newSeq()
+	s.script(psPrefix("Get-NetAdapter"), adUp)
+	pr := &fakeProbe{errs: []error{nil, errDown}}
+	c := &clock{t: time.Unix(1000, 0), step: time.Second}
+	d := deps(t, s, c, pr)
+	sleepErr := errors.New("deadline exceeded")
+	sleepN := 0
+	d.Sleep = func(context.Context, time.Duration) error {
+		sleepN++
+		if sleepN == 2 {
+			return sleepErr
+		}
+		return nil
+	}
+
+	err := Run(context.Background(), d)
+	if err == nil || !strings.Contains(err.Error(), "deadline exceeded") {
+		t.Fatalf("error must carry the sleep failure detail, got %v", err)
+	}
+	if !strings.Contains(err.Error(), errDown.Error()) {
+		t.Fatalf("error must also carry the last probe error, got %v", err)
+	}
+}
+
 // TestHeartbeatSleepErrorFailsClosed proves Finding 1's second gap is closed:
 // once Velociraptor has started, a non-cancellation Sleep error in the
 // heartbeat loop must go through FailClosed, not a bare error return that

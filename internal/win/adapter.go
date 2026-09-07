@@ -3,6 +3,7 @@ package win
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -60,15 +61,33 @@ func (n Net) DisableAll(ctx context.Context, adapters []Adapter) error {
 	return nil
 }
 
+// isPhantomAdapterError reports whether err is Enable-NetAdapter's response
+// to a name that no longer corresponds to a live device (Windows error 87,
+// "Requested operation not supported on adapter") - seen on a real host
+// 2026-09-05 when the recorded adapter list included one that had since
+// disappeared. Enabling an already-Up adapter does not error at all, so
+// this only ever matches the phantom case, and nothing can reach a device
+// that no longer exists - it is not a rollback failure.
+func isPhantomAdapterError(err error) bool {
+	return strings.Contains(strings.ToLower(err.Error()), "not supported on adapter")
+}
+
 // EnableAll is the counterpart to DisableAll: teardown/breakglass call it to
-// give the host its connectivity back after a fail-closed watchdog trip.
-// Enabling an already-enabled adapter is a harmless no-op, so callers can
-// pass every physical adapter without tracking which ones were disabled.
+// give the host its connectivity back after a fail-closed watchdog trip,
+// passing only the adapters FailClosed actually disabled (or, for an older
+// manifest predating that record, the baseline's Up adapters) - never every
+// currently-present physical adapter, since a name from either list can be
+// stale by the time teardown runs. It keeps going past a phantom-adapter
+// error instead of aborting the rest of the batch on the first one.
 func (n Net) EnableAll(ctx context.Context, adapters []Adapter) error {
+	var errs []error
 	for _, a := range adapters {
 		if _, err := runner.PS(ctx, n.R, fmt.Sprintf("Enable-NetAdapter -Name %s -Confirm:$false", psq(a.Name))); err != nil {
-			return fmt.Errorf("enable %s: %w", a.Name, err)
+			if isPhantomAdapterError(err) {
+				continue
+			}
+			errs = append(errs, fmt.Errorf("enable %s: %w", a.Name, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }

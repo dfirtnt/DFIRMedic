@@ -41,11 +41,18 @@ func newCA(t *testing.T, cn string) (*x509.Certificate, *ecdsa.PrivateKey, []byt
 // verifier would reject on name, and the probe must not care.
 func leafSignedBy(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey) tls.Certificate {
 	t.Helper()
+	return leafSignedByWithEKU(t, ca, caKey, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
+}
+
+// leafSignedByWithEKU is leafSignedBy with the leaf's Extended Key Usage
+// list under test control, for exercising probe.go's EKU check itself.
+func leafSignedByWithEKU(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey, eku []x509.ExtKeyUsage) tls.Certificate {
+	t.Helper()
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "VelociraptorServer"},
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
-		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: eku,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &key.PublicKey, caKey)
 	if err != nil {
@@ -90,6 +97,22 @@ func TestVerifyAcceptsLeafSignedByPinnedCA(t *testing.T) {
 	}
 	if len(fp) != 64 {
 		t.Fatalf("leaf fingerprint should be 64 hex chars, got %q", fp)
+	}
+}
+
+// TestVerifyRejectsLeafWithoutServerAuth pins the switch from
+// x509.ExtKeyUsageAny to x509.ExtKeyUsageServerAuth: a leaf chained to the
+// pinned CA but carrying only clientAuth (confirmed against a live
+// Velociraptor 0.77.2 server on 2026-09-06 that its own frontend leaf does
+// carry serverAuth, per `openssl x509 -noout -ext extendedKeyUsage`) must
+// still be rejected, the same way a leaf from a different CA is.
+func TestVerifyRejectsLeafWithoutServerAuth(t *testing.T) {
+	ca, caKey, caPEM := newCA(t, "Velociraptor CA")
+	leaf := leafSignedByWithEKU(t, ca, caKey, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth})
+	ip, port := serve(t, leaf)
+	_, err := TLS{IP: ip, Port: port, CAPEM: caPEM, Timeout: 5 * time.Second}.Verify(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "pinned CA") {
+		t.Fatalf("expected a leaf lacking serverAuth to be rejected, got %v", err)
 	}
 }
 

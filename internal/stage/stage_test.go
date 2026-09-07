@@ -272,6 +272,38 @@ func TestTakeBaselineCopiesRecoveryFilesBeforeInstall(t *testing.T) {
 	}
 }
 
+// TestTakeBaselinePreservesExistingFirewallExport covers a rerun against an
+// existing workdir left behind by an earlier E30/E40 abort: re-exporting now
+// would capture the already-quarantined policy as "original", and teardown
+// would then restore the quarantine instead of undoing it. The first
+// capture must survive untouched.
+func TestTakeBaselinePreservesExistingFirewallExport(t *testing.T) {
+	f := happyFake()
+	d := deps(t, f, incJSON)
+	wfwPath := filepath.Join(d.WorkDir, "firewall-original.wfw")
+	original := "pre-existing original policy from an earlier attempt"
+	if err := os.WriteFile(wfwPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := TakeBaseline(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	if f.Called("netsh.exe", "advfirewall", "export", wfwPath) {
+		t.Fatal("must not re-export when firewall-original.wfw already exists")
+	}
+	got, err := os.ReadFile(wfwPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != original {
+		t.Fatalf("existing firewall-original.wfw must be left byte-identical, got %q", got)
+	}
+	ev, _ := os.ReadFile(filepath.Join(d.WorkDir, "audit.jsonl"))
+	if !strings.Contains(string(ev), "baseline_export_preserved") {
+		t.Fatalf("audit log must record the preserved export:\n%s", ev)
+	}
+}
+
 func TestQuarantineRollsBackByImportingBaselinePolicy(t *testing.T) {
 	f := happyFake()
 	f.Responses[psKey(f, "New-NetFirewallRule -Group 'DFIRMedic-C1' -DisplayName 'DFIRMedic-C1: dhcp-out'")] = runner.Result{ExitCode: 1, Stderr: "nope"}

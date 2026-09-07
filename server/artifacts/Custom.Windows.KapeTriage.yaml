@@ -1,0 +1,36 @@
+name: Custom.Windows.KapeTriage
+description: |
+  DFIRMedic first-connect triage collection (responder-setup.md step 7.2).
+  This server's artifact set has no Windows.KapeFiles.Targets/_KapeTriage
+  (removed/renamed upstream), so this wraps Windows.Collectors.File's raw
+  NTFS accessor with the standard KAPE triage target list baked in as the
+  default: MFT/LogFile/UsnJrnl, registry hives, event logs, prefetch,
+  Amcache, LNK/jumplists. Launch with no configuration required.
+type: CLIENT
+parameters:
+  - name: Root
+    default: "C:"
+  - name: Accessor
+    default: "ntfs"
+  - name: collectionSpec
+    type: csv
+    default: |
+      Glob
+      $MFT
+      $LogFile
+      $Extend\$UsnJrnl:$J
+      Windows\System32\config\SYSTEM
+      Windows\System32\config\SOFTWARE
+      Windows\System32\config\SAM
+      Windows\System32\config\SECURITY
+      Users\*\NTUSER.DAT
+      Users\*\AppData\Local\Microsoft\Windows\UsrClass.dat
+      Windows\System32\winevt\Logs\*.evtx
+      Windows\Prefetch\*.pf
+      Windows\AppCompat\Programs\Amcache.hve
+      Users\*\AppData\Roaming\Microsoft\Windows\Recent\*.lnk
+      Users\*\AppData\Roaming\Microsoft\Windows\Recent\AutomaticDestinations\*
+sources:
+  - query: |
+      SELECT * FROM Artifact.Windows.Collectors.File(
+        Root=Root, Accessor=Accessor, collectionSpec=collectionSpec)

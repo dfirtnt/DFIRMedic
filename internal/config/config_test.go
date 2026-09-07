@@ -130,6 +130,8 @@ func TestValidateRejectsShallowInstallPath(t *testing.T) {
 		"drive root":      `C:\\`,
 		"bare file name":  `Velociraptor.exe`,
 		"unix path":       `/usr/local/bin/velociraptor`,
+		"dotdot segment":  `C:\\a\\..\\..\\..\\Windows\\x.exe`,
+		"dot segment":     `C:\\Program Files\\.\\Velociraptor\\Velociraptor.exe`,
 	} {
 		s := strings.Replace(sample, `"install_path":"C:\\Program Files\\Velociraptor\\Velociraptor.exe"`, `"install_path":"`+path+`"`, 1)
 		inc, _, err := Load(write(t, s))

@@ -91,6 +91,12 @@ func WaitLinkUp(ctx context.Context, d Deps) error {
 // lines under ~300 identical ones.
 const probeLogEvery = 30
 
+// probeLogFloor bounds how often a *change* in error text can trigger a
+// record, independent of probeLogEvery: without it, an error that alternates
+// between two texts every poll would satisfy "msg != t.recorded" on every
+// single call and write probe_failed every poll instead of being rate-limited.
+const probeLogFloor = 10
+
 // probeTracker turns a stream of probe results into (a) a rate-limited
 // probe_failed audit trail and (b) the last error text, so the E50/E51
 // FailClosed reason - which is what reaches the beacon and the responder -
@@ -99,14 +105,15 @@ const probeLogEvery = 30
 type probeTracker struct {
 	last     string // most recent failure text, for the FailClosed reason
 	recorded string // failure text of the last audit record written
-	since    int    // failures since that record
+	since    int    // fail() calls since that record, any text
 	seen     bool   // a failure has happened since the last success
 }
 
 func (t *probeTracker) fail(d Deps, msg string) {
 	t.last = msg
 	t.since++
-	if !t.seen || msg != t.recorded || t.since >= probeLogEvery {
+	changed := msg != t.recorded
+	if !t.seen || (changed && t.since >= probeLogFloor) || t.since >= probeLogEvery {
 		_ = d.Log.Record("probe_failed", map[string]string{"server": d.Inc.Server.IP, "error": msg})
 		t.recorded, t.since = msg, 0
 	}
@@ -189,7 +196,7 @@ func Run(ctx context.Context, d Deps) error {
 			if errors.Is(err, context.Canceled) {
 				return nil
 			}
-			return FailClosed(ctx, d, fmt.Sprintf("E51 server unreachable (sleep error: %v)", err))
+			return FailClosed(ctx, d, pt.reason(fmt.Sprintf("E51 server unreachable (sleep error: %v)", err)))
 		}
 		if _, ok := d.serverVerified(ctx, pt); ok {
 			lastOK = d.Now()
@@ -218,21 +225,30 @@ func FailClosed(ctx context.Context, d Deps, reason string) error {
 
 	ads, adsErr := d.Net.PhysicalAdapters(closeCtx)
 	var disableErrs []error
+	var disabled []string
 	if adsErr != nil {
 		disableErrs = append(disableErrs, fmt.Errorf("list adapters: %w", adsErr))
 	} else {
 		for _, a := range ads {
 			if err := d.Net.DisableAll(closeCtx, []win.Adapter{a}); err != nil {
 				disableErrs = append(disableErrs, err)
+			} else {
+				disabled = append(disabled, a.Name)
 			}
 		}
 	}
+	// Recorded so teardown/breakglass re-enable exactly these adapters later,
+	// not every adapter physically present at that (possibly much later)
+	// time - a name here can be stale by then, and a name never disabled
+	// here was never this watchdog trip's doing.
+	d.Man.DisabledAdapters = disabled
 
 	_ = d.Log.Record("fail_closed_result", map[string]any{
 		"velo_stop_ok":    veloErr == nil,
 		"velo_stop_error": fmt.Sprintf("%v", veloErr),
 		"adapters_ok":     len(disableErrs) == 0,
 		"adapters_error":  fmt.Sprintf("%v", errors.Join(disableErrs...)),
+		"disabled":        disabled,
 	})
 
 	_ = d.phase("FAILED")
